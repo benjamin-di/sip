@@ -10,3 +10,7 @@ The fleet branch adds GitHub-hosted tests and an immutable GHCR image release.
 The inherited Docker Hub release workflow is disabled in this fork. Published
 images contain upstream code and this patch, with source/revision/version labels.
 No carrier configuration, application code, prompts or call data are carried.
+
+Public fork workflows carry the unchanged generic same-tree gate and exact-commit
+CI check scripts because GitHub does not allow a public workflow to use actions
+from a private repository. Refresh these copies when the shared checks change.
