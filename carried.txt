@@ -1,0 +1,12 @@
+Baseline: LiveKit SIP v1.21.0 (ee19da1a7ef178593e232a27365de7b4ba8f8829).
+
+Only carried runtime patch: consume buffered final responses when a reliable
+SIP transaction closes. The stock regression test fails with buffered 200,
+401, 403 and 407 responses; the fix retains incomplete-transaction handling.
+The patch is also submitted against current upstream main. Drop it once a
+stable upstream release includes the fix, then return to the upstream image.
+
+The fleet branch adds GitHub-hosted tests and an immutable GHCR image release.
+The inherited Docker Hub release workflow is disabled in this fork. Published
+images contain upstream code and this patch, with source/revision/version labels.
+No carrier configuration, application code, prompts or call data are carried.

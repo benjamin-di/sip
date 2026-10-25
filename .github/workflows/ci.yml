@@ -1,0 +1,36 @@
+name: CI
+on:
+  push:
+    branches: [fleet]
+  pull_request:
+    branches: [fleet]
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      verified: ${{ steps.gate.outputs.verified }}
+    steps:
+      - uses: benjamin-di/ci/gate@v1
+        id: gate
+  tests:
+    needs: gate
+    if: needs.gate.outputs.verified != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev libopusfile-dev libsoxr-dev
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+      - run: go test -race ./pkg/...
+      - run: |
+          docker pull redis
+          docker pull livekit/livekit-server:master
+          go test -timeout 10m ./test/integration/...
