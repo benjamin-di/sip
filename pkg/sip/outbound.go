@@ -651,6 +651,7 @@ type sipRespFunc func(code sip.StatusCode, hdrs Headers)
 func sipResponse(ctx context.Context, tx sip.ClientTransaction, stop <-chan struct{}, onResponse sipRespFunc) (_ *sip.Response, cancelled string, _ error) {
 	cnt := 0
 	for {
+		var res *sip.Response
 		select {
 		case <-ctx.Done():
 			_ = tx.Cancel()
@@ -665,21 +666,25 @@ func sipResponse(ctx context.Context, tx sip.ClientTransaction, stop <-chan stru
 			_ = tx.Cancel()
 			return nil, "shutdown", psrpc.NewErrorf(psrpc.Canceled, "service shutting down")
 		case <-tx.Done():
-			return nil, "", psrpc.NewError(psrpc.Canceled, transactionTimeoutError{responses: cnt})
-		case res := <-tx.Responses():
-			if res == nil {
+			// Reliable transactions may finish with a final response still queued.
+			select {
+			case res = <-tx.Responses():
+			default:
 				return nil, "", psrpc.NewError(psrpc.Canceled, transactionTimeoutError{responses: cnt})
 			}
-			status := res.StatusCode
-			if onResponse != nil {
-				onResponse(res.StatusCode, res.Headers())
-			}
-			if status/100 != 1 { // != 1xx
-				return res, "", nil
-			}
-			// continue
-			cnt++
+		case res = <-tx.Responses():
 		}
+		if res == nil {
+			return nil, "", psrpc.NewError(psrpc.Canceled, transactionTimeoutError{responses: cnt})
+		}
+		status := res.StatusCode
+		if onResponse != nil {
+			onResponse(res.StatusCode, res.Headers())
+		}
+		if status/100 != 1 {
+			return res, "", nil
+		}
+		cnt++
 	}
 }
 
