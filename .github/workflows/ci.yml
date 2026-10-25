@@ -16,8 +16,16 @@ jobs:
     outputs:
       verified: ${{ steps.gate.outputs.verified }}
     steps:
-      - uses: benjamin-di/ci/gate@v1
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      # Public forks cannot access the private shared-action repository.
+      - run: bash .github/ci/gate.sh
         id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+          WORKFLOW: ci.yml
   tests:
     needs: gate
     if: needs.gate.outputs.verified != 'true'
