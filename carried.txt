@@ -1,6 +1,6 @@
 Baseline: LiveKit SIP v1.21.0 (ee19da1a7ef178593e232a27365de7b4ba8f8829).
 
-Only carried runtime patch: consume buffered final responses when a reliable
+Carried runtime patch: consume buffered final responses when a reliable
 SIP transaction closes. The stock regression test fails with buffered 200,
 401, 403 and 407 responses; the fix retains incomplete-transaction handling.
 The patch is also submitted against current upstream main. Drop it once a
@@ -8,9 +8,19 @@ stable upstream release includes the fix, then return to the upstream image.
 
 The fleet branch adds GitHub-hosted tests and an immutable GHCR image release.
 The inherited Docker Hub release workflow is disabled in this fork. Published
-images contain upstream code and this patch, with source/revision/version labels.
+images contain upstream code and these patches, with source/revision/version labels.
 No carrier configuration, application code, prompts or call data are carried.
 
 Public fork workflows carry the unchanged generic same-tree gate and exact-commit
 CI check scripts because GitHub does not allow a public workflow to use actions
 from a private repository. Refresh these copies when the shared checks change.
+
+Carried runtime patch: explicit RTP, in-band and combined DTMF modes, with
+complete receiver tests for ordered digits, end repeats and decoded G.711
+frequency pairs. Missing event negotiation reports an error in RTP mode.
+
+Carried runtime patch: synchronize outbound logger enrichment with concurrent
+BYE/room callbacks. Keep its lock separate from the call-state lock.
+
+Media SDK pin: upstream 0de6c2e55d42 includes frame-aligned DTMF durations and
+8000 Hz offers. No private audio, carrier settings or telephone fixtures are used.
