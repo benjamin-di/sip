@@ -30,3 +30,8 @@ bursty WebRTC delivery (livekit/sip#608). The default remains upstream's 5 frame
 operators can choose a bounded larger buffer with the associated latency cost.
 Fake-clock tests distinguish continuous speech starvation from ordinary silence.
 Remove the plumbing when a stable SIP release exposes this option itself.
+
+Carried shutdown patch: join reconnect subscription workers when closing the
+room. This fences new work after close and prevents asynchronous writes/logging
+from outliving the call or test fixture. Keep the SDK disconnect outside the
+registration lock. Drop once upstream room teardown owns these workers.
