@@ -24,3 +24,9 @@ BYE/room callbacks. Keep its lock separate from the call-state lock.
 
 Media SDK pin: upstream 0de6c2e55d42 includes frame-aligned DTMF durations and
 8000 Hz offers. No private audio, carrier settings or telephone fixtures are used.
+
+Carried configuration patch: expose the upstream mixer's input buffer option for
+bursty WebRTC delivery (livekit/sip#608). The default remains upstream's 5 frames;
+operators can choose a bounded larger buffer with the associated latency cost.
+Fake-clock tests distinguish continuous speech starvation from ordinary silence.
+Remove the plumbing when a stable SIP release exposes this option itself.

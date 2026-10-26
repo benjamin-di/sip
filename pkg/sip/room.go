@@ -223,6 +223,13 @@ func DefaultGetRoomFunc(log logger.Logger, st *RoomStats) RoomInterface {
 	return NewRoom(log, st)
 }
 
+func configuredGetRoomFunc(conf *config.Config) GetRoomFunc {
+	frames := conf.MixerInputBufferFrames
+	return func(log logger.Logger, st *RoomStats) RoomInterface {
+		return NewRoom(log, st, mixer.WithInputBufferFrames(frames))
+	}
+}
+
 type Room struct {
 	log     logger.Logger
 	roomLog logger.Logger // deferred logger
@@ -264,7 +271,7 @@ type RoomConfig struct {
 	LogSignalChanges bool
 }
 
-func NewRoom(log logger.Logger, st *RoomStats) *Room {
+func NewRoom(log logger.Logger, st *RoomStats, options ...mixer.MixerOptions) *Room {
 	if st == nil {
 		st = &RoomStats{}
 	}
@@ -278,7 +285,8 @@ func NewRoom(log logger.Logger, st *RoomStats) *Room {
 	r.inboundDTMF = inboundDTMFWriter{r: r}
 
 	var err error
-	r.mix, err = mixer.NewMixer(r.outboundAudio, rtp.DefFrameDur, 1, mixer.WithStats(&st.Mixer), mixer.WithOutputChannel())
+	options = append([]mixer.MixerOptions{mixer.WithStats(&st.Mixer), mixer.WithOutputChannel()}, options...)
+	r.mix, err = mixer.NewMixer(r.outboundAudio, rtp.DefFrameDur, 1, options...)
 	if err != nil {
 		panic(err)
 	}

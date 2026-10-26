@@ -111,7 +111,7 @@ func NewClient(region string, conf *config.Config, log logger.Logger, mon *stats
 		mon:             mon,
 		getStateHandler: getStateHandler,
 		getSipClient:    DefaultGetSipClientFunc,
-		getRoom:         DefaultGetRoomFunc,
+		getRoom:         configuredGetRoomFunc(conf),
 		activeCalls:     make(map[LocalTag]*outboundCall),
 	}
 	for _, option := range options {

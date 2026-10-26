@@ -150,6 +150,9 @@ type Config struct {
 	AudioDTMF              bool    `yaml:"audio_dtmf"`
 	EnableJitterBuffer     bool    `yaml:"enable_jitter_buffer"`
 	EnableJitterBufferProb float64 `yaml:"enable_jitter_buffer_prob"`
+	// MixerInputBufferFrames bounds decoded room audio queued before SIP playout.
+	// Each frame is 20 ms. Zero retains the upstream mixer default (5 frames).
+	MixerInputBufferFrames int `yaml:"mixer_input_buffer_frames"`
 
 	// internal
 	ServiceName string `yaml:"-"`
@@ -188,6 +191,9 @@ func NewConfig(confString string) (*Config, error) {
 }
 
 func (c *Config) Init() error {
+	if c.MixerInputBufferFrames < 0 || c.MixerInputBufferFrames > 50 {
+		return fmt.Errorf("mixer_input_buffer_frames must be between 0 and 50")
+	}
 	if c.DTMFMode != "" && c.DTMFMode != "rtp" && c.DTMFMode != "audio" && c.DTMFMode != "both" {
 		return fmt.Errorf("dtmf_mode must be rtp, audio or both")
 	}
