@@ -276,11 +276,11 @@ func (h *pipelineHarness) mediaConfig() *sdp.MediaConfig {
 	}
 }
 
-func (h *pipelineHarness) configureType(codec msdk.CodecType, rate int, audioPT, dtmfPT byte, dtmfAudio bool) sdp.CodecInfo {
+func (h *pipelineHarness) configureType(codec msdk.CodecType, rate int, audioPT, dtmfPT byte, dtmfAudio bool, mode ...string) sdp.CodecInfo {
 	info, create, ok := codec.Supports(msdk.CodecConfig{SampleRate: rate})
 	require.True(h.t, ok, "configuration not supported: %s/%d", codec.SDPName(), rate)
 	ac := create().(msdk.AudioCodec)
-	h.configure(info, codec, ac, audioPT, dtmfPT, dtmfAudio)
+	h.configure(info, codec, ac, audioPT, dtmfPT, dtmfAudio, mode...)
 	sinfo := sdp.CodecInfo{
 		Type:  audioPT,
 		Codec: codec,
@@ -291,7 +291,7 @@ func (h *pipelineHarness) configureType(codec msdk.CodecType, rate int, audioPT,
 	return sinfo
 }
 
-func (h *pipelineHarness) configure(info msdk.CodecInfo, codec msdk.CodecType, ac msdk.AudioCodec, audioPT, dtmfPT byte, dtmfAudio bool) {
+func (h *pipelineHarness) configure(info msdk.CodecInfo, codec msdk.CodecType, ac msdk.AudioCodec, audioPT, dtmfPT byte, dtmfAudio bool, mode ...string) {
 	h.t.Helper()
 	h.codec = ac
 	sinfo := sdp.CodecInfo{
@@ -302,6 +302,9 @@ func (h *pipelineHarness) configure(info msdk.CodecInfo, codec msdk.CodecType, a
 	h.audio = &sinfo
 	h.dtmf = dtmfCodec(nil, dtmfPT, info.RTPClockRate, 0)
 	h.conf.opts = &MediaOptions{DTMFAudio: dtmfAudio}
+	if len(mode) > 0 {
+		h.conf.opts.DTMFMode = mode[0]
+	}
 
 	pipe, err := NewMediaPortPipeline(h.conf, h.mediaConfig(), h.port, h.audioIn, h.dtmfIn, h.audioIn.SampleRate())
 	require.NoError(h.t, err)
@@ -475,7 +478,7 @@ func (h *pipelineHarness) testAudioFromPort(t *testing.T) {
 func (h *pipelineHarness) testDTMFFromRoom(t *testing.T) {
 	h.drainRemote()
 	if h.dtmf == nil || h.dtmf.Type == 0 {
-		require.NoError(t, h.dtmfOut.WriteSample("5"))
+		require.Error(t, h.dtmfOut.WriteSample("5"))
 		h.drainRemote()
 		return
 	}

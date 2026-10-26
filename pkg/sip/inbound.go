@@ -1373,6 +1373,7 @@ func (c *inboundCall) createMediaPort(mconf *sipMediaConfig, conf *config.Config
 		Codecs:               mconf.Codecs,
 		Encryption:           mconf.Encryption,
 		DTMFAudio:            conf.AudioDTMF,
+		DTMFMode:             conf.DTMFMode,
 	}, RoomSampleRate)
 	if err != nil {
 		return err

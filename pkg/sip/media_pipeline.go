@@ -91,7 +91,7 @@ func (p *mediaPortPipeline) GetConnectors() (msdk.PCM16Writer, msdk.WriteCloser[
 		return nil, nil
 	}
 	if p.dtmfToPort == nil {
-		return msdk.NopCloser(p.mixerToPort), nil
+		return msdk.NopCloser(p.mixerToPort), unsupportedDTMFWriter{}
 	}
 	return msdk.NopCloser(p.mixerToPort), msdk.NopCloser(p.dtmfToPort)
 }
@@ -246,6 +246,16 @@ func (p *mediaPortPipeline) handleEventRTP(h *rtp.Header, payload []byte) error 
 // Construct the Audio and optionally DTMF pipeline from LK PCM to SIP RTP
 // Returns the insulated (nopCloser) connectors, and an error.
 func (p *mediaPortPipeline) setupOutput(mc *sdp.MediaConfig, incomingSampleRate int) error {
+	mode := p.conf.opts.DTMFMode
+	if mode == "" {
+		mode = "rtp"
+		if p.conf.opts.DTMFAudio {
+			mode = "both"
+		}
+	}
+	if mode != "rtp" && mode != "audio" && mode != "both" {
+		return fmt.Errorf("invalid DTMF mode")
+	}
 	p.rtpLoopWG.Go(p.rtpLoop)
 	w, err := p.sess.OpenWriteStream()
 	if err != nil {
@@ -289,9 +299,9 @@ func (p *mediaPortPipeline) setupOutput(mc *sdp.MediaConfig, incomingSampleRate 
 	p.audioToPort = audioOut
 	p.mixerToPort = audioOut
 
-	if dtmfInfo.Type != 0 {
+	if dtmfInfo.Type != 0 || mode == "audio" {
 		var dtmfAudio msdk.PCM16Writer = nil
-		if p.conf.opts.DTMFAudio {
+		if mode != "rtp" {
 			// Add separate mixer for DTMF audio.
 			// TODO: optimize, if we'll ever need this code path
 			mix, err := mixer.NewMixer(audioOut, rtp.DefFrameDur, 1, mixer.WithOutputChannel())
@@ -304,11 +314,15 @@ func (p *mediaPortPipeline) setupOutput(mc *sdp.MediaConfig, incomingSampleRate 
 			p.mixerToPort = audioOut
 		}
 
+		var dtmfEvents *rtp.Stream
+		if mode != "audio" {
+			dtmfEvents = s.NewStream(dtmfInfo.Type, dtmfInfo.Info.RTPClockRate)
+		}
 		p.dtmfToPort = &dtmfOutWriter{
 			log:        p.conf.log,
 			pcmRate:    dtmfInfo.Info.SampleRate,
 			ctx:        p.ctx,
-			dtmfEvents: s.NewStream(dtmfInfo.Type, dtmfInfo.Info.RTPClockRate),
+			dtmfEvents: dtmfEvents,
 			dtmfAudio:  dtmfAudio,
 			getTimestamp: func() uint32 {
 				audioTs := audioOutRTP.GetCurrentTimestamp()
@@ -318,6 +332,14 @@ func (p *mediaPortPipeline) setupOutput(mc *sdp.MediaConfig, incomingSampleRate 
 	}
 	return nil
 }
+
+// An absent negotiated event stream must not acknowledge a discarded digit.
+type unsupportedDTMFWriter struct{}
+
+func (unsupportedDTMFWriter) String() string           { return "unsupported DTMF" }
+func (unsupportedDTMFWriter) SampleRate() int          { return 0 }
+func (unsupportedDTMFWriter) Close() error             { return nil }
+func (unsupportedDTMFWriter) WriteSample(string) error { return fmt.Errorf("DTMF was not negotiated") }
 
 func (p *mediaPortPipeline) rtpLoop() {
 	// Need a loop to process all incoming packets.

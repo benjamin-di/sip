@@ -139,6 +139,7 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 		DrainingIdleTimeout:  conf.RTPDrainingIdleTimeout,
 		DrainingDuration:     conf.RTPDrainingDuration,
 		DTMFAudio:            conf.AudioDTMF,
+		DTMFMode:             conf.DTMFMode,
 		Codecs:               sipConf.mediaConfig.Codecs,
 		Encryption:           sipConf.mediaConfig.Encryption,
 	}, RoomSampleRate)

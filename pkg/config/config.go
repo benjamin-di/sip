@@ -144,6 +144,8 @@ type Config struct {
 	// AddRecordRoute forces SIP to add Record-Route headers to the responses.
 	AddRecordRoute bool `yaml:"add_record_route"`
 
+	// DTMFMode selects rtp, audio or both. Empty retains AudioDTMF compatibility.
+	DTMFMode string `yaml:"dtmf_mode"`
 	// AudioDTMF forces SIP to generate audio DTMF tones in addition to digital.
 	AudioDTMF              bool    `yaml:"audio_dtmf"`
 	EnableJitterBuffer     bool    `yaml:"enable_jitter_buffer"`
@@ -186,6 +188,9 @@ func NewConfig(confString string) (*Config, error) {
 }
 
 func (c *Config) Init() error {
+	if c.DTMFMode != "" && c.DTMFMode != "rtp" && c.DTMFMode != "audio" && c.DTMFMode != "both" {
+		return fmt.Errorf("dtmf_mode must be rtp, audio or both")
+	}
 	c.NodeID = guid.New("NE_")
 
 	if c.SIPPort == 0 {

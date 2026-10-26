@@ -380,6 +380,7 @@ type MediaOptions struct {
 	Codecs               *msdk.CodecSet
 	Encryption           sdp.Encryption
 	DTMFAudio            bool
+	DTMFMode             string
 }
 
 func (o *MediaOptions) ApplyDefaults() {
