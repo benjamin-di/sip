@@ -159,6 +159,7 @@ func (cm *callManager) newCall(ctx context.Context, tid traceid.ID, conf *config
 		DrainingIdleTimeout:  conf.RTPDrainingIdleTimeout,
 		DrainingDuration:     conf.RTPDrainingDuration,
 		DTMFAudio:            conf.AudioDTMF,
+		DTMFMode:             conf.DTMFMode,
 		Codecs:               sipConf.mediaConfig.Codecs,
 		Encryption:           sipConf.mediaConfig.Encryption,
 		DropAudioDuringDTMF:  sipConf.mediaConfig.DropAudioDuringDTMF,

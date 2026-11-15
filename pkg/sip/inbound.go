@@ -1421,6 +1421,7 @@ func (c *inboundCall) createMediaPort(mconf *sipMediaConfig, conf *config.Config
 		Encryption:           mconf.Encryption,
 		DTMFAudio:            conf.AudioDTMF,
 		DropAudioDuringDTMF:  mconf.DropAudioDuringDTMF,
+		DTMFMode:             conf.DTMFMode,
 	}, RoomSampleRate)
 	if err != nil {
 		return err

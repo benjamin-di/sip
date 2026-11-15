@@ -92,7 +92,7 @@ func (p *mediaPortPipeline) GetConnectors() (msdk.PCM16Writer, msdk.WriteCloser[
 		return nil, nil
 	}
 	if p.dtmfToPort == nil {
-		return msdk.NopCloser(p.mixerToPort), nil
+		return msdk.NopCloser(p.mixerToPort), unsupportedDTMFWriter{}
 	}
 	return msdk.NopCloser(p.mixerToPort), msdk.NopCloser(p.dtmfToPort)
 }
@@ -252,6 +252,16 @@ func (p *mediaPortPipeline) handleEventRTP(h *rtp.Header, payload []byte) error 
 // Construct the Audio and optionally DTMF pipeline from LK PCM to SIP RTP
 // Returns the insulated (nopCloser) connectors, and an error.
 func (p *mediaPortPipeline) setupOutput(mc *sdp.MediaConfig, incomingSampleRate int) error {
+	mode := p.conf.opts.DTMFMode
+	if mode == "" {
+		mode = "rtp"
+		if p.conf.opts.DTMFAudio {
+			mode = "both"
+		}
+	}
+	if mode != "rtp" && mode != "audio" && mode != "both" {
+		return fmt.Errorf("invalid DTMF mode")
+	}
 	p.rtpLoopWG.Go(p.rtpLoop)
 	w, err := p.sess.OpenWriteStream()
 	if err != nil {
@@ -295,27 +305,22 @@ func (p *mediaPortPipeline) setupOutput(mc *sdp.MediaConfig, incomingSampleRate 
 	p.audioToPort = audioOut
 	p.mixerToPort = audioOut
 
-	if dtmfInfo.Type != 0 {
+	if dtmfInfo.Type != 0 || mode == "audio" {
 		var audioSwitch *msdk.WriteCloserSwitch[msdk.PCM16Sample]
-		dropAudioDuringDTMF := p.conf.opts.DropAudioDuringDTMF
-		if dtmfInfo.Info.RTPClockRate != codecInfo.RTPClockRate {
-			// Asterisk releases older than ~Oct 2024 don't support >8kHz dtmf,
-			// AND have bug(s) when receiving audio during DTMF. It is what it is.
-			// Mismatching clock rates are a fingerprint of releases - Force audio drop during DTMF.
+		dropAudioDuringDTMF := p.conf.opts.DropAudioDuringDTMF && mode != "audio"
+		if mode != "audio" && dtmfInfo.Info.RTPClockRate != codecInfo.RTPClockRate {
 			dropAudioDuringDTMF = true
 			p.conf.log.Infow("dropping audio during DTMF due to clock rate mismatch",
 				"audio-clock-rate", codecInfo.RTPClockRate, "dtmf-clock-rate", dtmfInfo.Info.RTPClockRate)
 		}
 		if dropAudioDuringDTMF {
 			audioSwitch = msdk.NewWriteCloserSwitch[msdk.PCM16Sample](p.mixerToPort.SampleRate())
-			_ = audioSwitch.Swap(p.mixerToPort) // just created, always returns nil
+			_ = audioSwitch.Swap(p.mixerToPort)
 			p.mixerToPort = audioSwitch
 		}
 
-		var dtmfAudio msdk.PCM16Writer = nil
-		if p.conf.opts.DTMFAudio && !dropAudioDuringDTMF {
-			// Add separate mixer for DTMF audio.
-			// TODO: optimize, if we'll ever need this code path
+		var dtmfAudio msdk.PCM16Writer
+		if mode != "rtp" && !dropAudioDuringDTMF {
 			mix, err := mixer.NewMixer(p.mixerToPort, rtp.DefFrameDur, 1, mixer.WithOutputChannel())
 			if err != nil {
 				return err
@@ -325,17 +330,29 @@ func (p *mediaPortPipeline) setupOutput(mc *sdp.MediaConfig, incomingSampleRate 
 			p.dtmfMixer = mix
 		}
 
+		var dtmfEvents *rtp.Stream
+		if mode != "audio" {
+			dtmfEvents = s.NewManualStream(dtmfInfo.Type)
+		}
 		p.dtmfToPort = &dtmfOutWriter{
 			log:         p.conf.log,
 			pcmRate:     dtmfInfo.Info.SampleRate,
 			ctx:         p.ctx,
-			dtmfEvents:  s.NewManualStream(dtmfInfo.Type),
+			dtmfEvents:  dtmfEvents,
 			dtmfAudio:   dtmfAudio,
 			audioSwitch: audioSwitch,
 		}
 	}
 	return nil
 }
+
+// An absent negotiated event stream must not acknowledge a discarded digit.
+type unsupportedDTMFWriter struct{}
+
+func (unsupportedDTMFWriter) String() string           { return "unsupported DTMF" }
+func (unsupportedDTMFWriter) SampleRate() int          { return 0 }
+func (unsupportedDTMFWriter) Close() error             { return nil }
+func (unsupportedDTMFWriter) WriteSample(string) error { return fmt.Errorf("DTMF was not negotiated") }
 
 func (p *mediaPortPipeline) rtpLoop() {
 	// Need a loop to process all incoming packets.

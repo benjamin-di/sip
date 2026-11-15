@@ -388,6 +388,7 @@ type MediaOptions struct {
 	Encryption           sdp.Encryption
 	DTMFAudio            bool
 	DropAudioDuringDTMF  bool // stop sending audio RTP while DTMF is sent
+	DTMFMode             string
 }
 
 func (o *MediaOptions) ApplyDefaults() {
