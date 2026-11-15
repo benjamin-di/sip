@@ -131,7 +131,7 @@ func newCallManager(tr SIPTransport, cli *Client, region string, conf *config.Co
 		sconf:              sconf,
 		getStateHandler:    getStateHandler,
 		sealer:             sealer,
-		getRoom:            DefaultGetRoomFunc,
+		getRoom:            configuredGetRoomFunc(conf),
 		byLocalTag:         make(map[LocalTag]*inboundCall),
 		activeCalls:        make(map[LocalTag]*outboundCall),
 		pendingTransfers:   make(map[LocalTag]*PendingTransfer),

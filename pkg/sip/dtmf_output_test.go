@@ -15,8 +15,80 @@ import (
 	msdk "github.com/livekit/media-sdk"
 	"github.com/livekit/media-sdk/dtmf"
 	"github.com/livekit/media-sdk/g711"
+	"github.com/livekit/protocol/livekit"
+	"github.com/livekit/protocol/logger"
+	lksdk "github.com/livekit/server-sdk-go/v2"
+	"github.com/livekit/sip/pkg/config"
 	"github.com/stretchr/testify/require"
 )
+
+// Cover the actual room data-packet callback used by publish_dtmf, rather than
+// only injecting a digit train directly into the media pipeline's connector.
+func TestRoomKeypadPacketsReachTelephoneAudio(t *testing.T) {
+	h := newPipelineHarness(t, RoomSampleRate)
+	c := audioCodecByName(t, g711.ULawSDPNameOnly)
+	h.configureType(c, 8000, testAudioPT(c), testDTMFPT, false, "audio")
+	r := NewRoom(logger.NewTestLogger(t), &RoomStats{})
+	t.Cleanup(func() { _ = r.Close() })
+	audio, digits := h.pipeline.GetConnectors()
+	r.WriteOutboundAudioTo(audio)
+	r.WriteOutboundDTMFTo(digits)
+	track := r.NewTrack()
+	stop, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		frame := make(msdk.PCM16Sample, RoomSampleRate/50)
+		for i := range frame {
+			frame[i] = int16(1000 * math.Sin(2*math.Pi*440*float64(i)/RoomSampleRate))
+		}
+		for {
+			select {
+			case <-ticker.C:
+				_ = track.WriteSample(frame)
+			case <-stop:
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() { close(stop); <-stopped })
+	h.drainRemote()
+	callback := r.newRoomCallback(&config.Config{}, RoomConfig{})
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		for _, digit := range "12#" {
+			callback.OnDataPacket(&livekit.SipDTMF{Digit: string(digit)}, lksdk.DataReceiveParams{})
+		}
+	}()
+	var pcm msdk.PCM16Sample
+	var completed time.Time
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case <-sent:
+			if completed.IsZero() {
+				completed = time.Now()
+			}
+		default:
+		}
+		if !completed.IsZero() && time.Since(completed) > 300*time.Millisecond {
+			break
+		}
+		packet, ok := h.readRemotePacket(20 * time.Millisecond)
+		if !ok {
+			continue
+		}
+		require.NotEqual(t, testDTMFPT, packet.PayloadType, "audio-only mode must not add duplicate events")
+		if packet.PayloadType == h.audio.Type {
+			pcm = append(pcm, g711.ULawSample(packet.Payload).Decode()...)
+		}
+	}
+	require.False(t, completed.IsZero())
+	require.EqualValues(t, 3, r.stats.dataPackets.Load())
+	require.Equal(t, "12#", decodeTestDTMF(pcm), "room keypad packets must survive G.711 under concurrent voice")
+}
 
 func TestOutboundDTMFSequenceAndPCM(t *testing.T) {
 	for _, codec := range []string{g711.ULawSDPNameOnly, g711.ALawSDPNameOnly} {
