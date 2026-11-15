@@ -866,10 +866,14 @@ func TestDTMFOutWriterUppercase(t *testing.T) {
 func TestMediaPipelineDropAudioDuringDTMF(t *testing.T) {
 	cases := []struct {
 		name     string
+		mode     string
 		drop     bool
 		dtmfRate int
 		want     bool
 	}{
+		{name: "audio_with_drop_option", mode: "audio", drop: true, dtmfRate: 8000, want: false},
+		{name: "audio_with_clock_mismatch", mode: "audio", dtmfRate: 16000, want: false},
+		{name: "both_with_drop_option", mode: "both", drop: true, dtmfRate: 8000, want: true},
 		{name: "off", drop: false, dtmfRate: 8000, want: false},
 		{name: "option", drop: true, dtmfRate: 8000, want: true},
 		{name: "clock_rate_mismatch", drop: false, dtmfRate: 16000, want: true},
@@ -883,13 +887,17 @@ func TestMediaPipelineDropAudioDuringDTMF(t *testing.T) {
 			h.port.Reopen()
 
 			h.dtmf = dtmfCodec(nil, testDTMFPT, c.dtmfRate, 0)
-			h.conf.opts = &MediaOptions{DropAudioDuringDTMF: c.drop}
+			h.conf.opts = &MediaOptions{DropAudioDuringDTMF: c.drop, DTMFMode: c.mode}
 			pipe, err := NewMediaPortPipeline(h.conf, h.mediaConfig(), h.port, h.audioIn, h.dtmfIn, h.audioIn.SampleRate())
 			require.NoError(t, err)
 			h.pipeline = pipe
 
 			w := pipe.dtmfToPort.(*dtmfOutWriter)
 			require.Equal(t, c.want, w.audioSwitch != nil)
+			if c.mode == "audio" {
+				require.Nil(t, w.dtmfEvents)
+				require.NotNil(t, w.dtmfAudio)
+			}
 			if c.want {
 				require.Equal(t, msdk.PCM16Writer(w.audioSwitch), pipe.mixerToPort)
 			}
