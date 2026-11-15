@@ -242,3 +242,12 @@ docker run --rm \
 </tbody>
 </table>
 <!--END_REPO_NAV-->
+
+### Outbound keypad signalling
+
+`dtmf_mode` selects `rtp` (RFC 4733 telephone events), `audio` (in-band tones),
+or `both`. Explicit mode takes precedence over the legacy `audio_dtmf` boolean;
+leaving it empty preserves that setting. In-band mode uses the existing media
+mixer and codec path, including when telephone events were not negotiated.
+RTP mode reports unsupported signalling instead of silently discarding digits.
+Delivery acceptance does not establish that a remote IVR or handset received it.
