@@ -50,6 +50,30 @@ func TestHandleNotify(t *testing.T) {
 			Expect: notifyInfo{Method: sip.REFER, CSeq: 1234, Status: 200, Reason: "OK"},
 		},
 		{
+			Name:   "id with spaces",
+			Event:  "refer ; id = 1234",
+			Body:   "SIP/2.0 200 OK" + headers,
+			Expect: notifyInfo{Method: sip.REFER, CSeq: 1234, Status: 200, Reason: "OK"},
+		},
+		{
+			Name:   "id with extra params",
+			Event:  "Refer;foo=bar;ID=1234;baz",
+			Body:   "SIP/2.0 200 OK" + headers,
+			Expect: notifyInfo{Method: sip.REFER, CSeq: 1234, Status: 200, Reason: "OK"},
+		},
+		{
+			Name:   "id with quoted params",
+			Event:  `refer;id=1234;foo="tag;id=13;\"rest";bar`,
+			Body:   "SIP/2.0 200 OK" + headers,
+			Expect: notifyInfo{Method: sip.REFER, CSeq: 1234, Status: 200, Reason: "OK"},
+		},
+		{
+			Name:  "invalid id",
+			Event: "refer;id=abc",
+			Body:  "SIP/2.0 200 OK" + headers,
+			Error: true,
+		},
+		{
 			Name:   "failure",
 			Event:  "refer;id=1234",
 			Body:   "SIP/2.0 404 Not found" + headers,
@@ -366,6 +390,25 @@ func TestParseReason(t *testing.T) {
 				Text:  "Terminated",
 			},
 			Normal: true,
+		},
+		{
+			Name:   "Q.850 capitalized parameter names",
+			Header: `Q.850;Cause=16;Text="Terminated"`,
+			Reason: ReasonHeader{
+				Type:  "q.850",
+				Cause: 16,
+				Text:  "Terminated",
+			},
+			Normal: true,
+		},
+		{
+			Name:   "X.int capitalized reason code",
+			Header: `X.int;ReasonCode=0x0000032D;add-info=05CC.0001.0004`,
+			Reason: ReasonHeader{
+				Type:  "x.int",
+				Cause: 0x32D,
+			},
+			Normal: false,
 		},
 		{
 			Name:   "X.int",

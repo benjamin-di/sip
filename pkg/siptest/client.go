@@ -114,9 +114,9 @@ func NewClient(id string, conf ClientConfig) (*Client, error) {
 	}
 	cli.mediaConn = rtpconn.NewConn(&rtpconn.ConnConfig{TimeoutCallback: conf.OnMediaTimeout})
 	cli.mediaConn.EnableTimeout(false) // enabled later
-	cli.media = rtp.NewSeqWriter(cli.mediaConn)
+	cli.media = rtp.NewSeqWriter(cli.mediaConn, codec.Info().RTPClockRate)
 	cli.mediaAudio = cli.media.NewStream(cli.audioType, codec.Info().RTPClockRate)
-	cli.mediaDTMF = cli.media.NewStream(101, codec.Info().RTPClockRate)
+	cli.mediaDTMF = cli.media.NewManualStream(101)
 	cli.audioOut, err = mixer.NewMixer(rtp.EncodePCM(cli.mediaAudio, cli.audioCodec), rtp.DefFrameDur, 1, mixer.WithOutputChannel())
 	if err != nil {
 		cli.Close()
@@ -363,14 +363,15 @@ func (c *Client) Dial(ip string, host string, number string, headers map[string]
 	if err = c.sipClient.WriteRequest(sip.NewAckRequest(req, resp, nil)); err != nil {
 		return err
 	}
-	ip, port, err := parseSDPAnswer(resp.Body())
+	var answer sdp.SessionDescription
+	if err = answer.Unmarshal(resp.Body()); err != nil {
+		return err
+	}
+	dst, err := lksdp.GetAudioDest(&answer, lksdp.GetAudio(&answer))
 	if err != nil {
 		return err
 	}
-	dstAddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("%s:%d", ip, port))
-	if err != nil {
-		return err
-	}
+	dstAddr := net.UDPAddrFromAddrPort(dst)
 	c.inviteReq = req
 	c.inviteResp = resp
 
@@ -449,7 +450,7 @@ func (c *Client) SendDTMF(digits string) error {
 	w := c.audioOut.NewInput()
 	defer w.Close()
 	sampleRate := c.audioCodec.Info().RTPClockRate
-	return dtmf.Write(context.Background(), w, c.mediaDTMF, sampleRate, c.mediaAudio.GetCurrentTimestamp(), digits)
+	return dtmf.Write(context.Background(), w, c.mediaDTMF, sampleRate, digits)
 }
 
 func (c *Client) SendNotify(eventReq *sip.Request, notifyStatus string) error {
@@ -617,25 +618,13 @@ func (c *Client) SendAudio(path string) error {
 		}
 	}
 
-	i := 0
 	w := c.audioOut.NewInput()
 	defer w.Close()
-
-	for range time.NewTicker(rtp.DefFrameDur).C {
-		if i >= len(audioFrames) {
-			break
-		}
-		if err = w.WriteSample(audioFrames[i]); err != nil {
-			return err
-		}
-		i++
-	}
-	return nil
+	return msdk.PlayAudio[msdk.PCM16Sample](context.Background(), w, rtp.DefFrameDur, audioFrames)
 }
 
 func (c *Client) SendSilence(ctx context.Context) error {
-	const framesPerSec = int(time.Second / rtp.DefFrameDur)
-	buf := make(msdk.PCM16Sample, c.audioCodec.Info().SampleRate/framesPerSec)
+	buf := make(msdk.PCM16Sample, c.audioCodec.Info().SampleRate/rtp.DefFramesPerSec)
 	wr := c.audioOut.NewInput()
 	defer wr.Close()
 
@@ -662,8 +651,7 @@ const (
 // SendSignal generate an audio signal with a given value. It repeats the signal n times, each frame containing one signal.
 // If n <= 0, it will send the signal until the context is cancelled.
 func (c *Client) SendSignal(ctx context.Context, n int, val int) error {
-	const framesPerSec = int(time.Second / rtp.DefFrameDur)
-	signal := make(msdk.PCM16Sample, c.audioCodec.Info().SampleRate/framesPerSec)
+	signal := make(msdk.PCM16Sample, c.audioCodec.Info().SampleRate/rtp.DefFramesPerSec)
 	audiotest.GenSignal(signal, []audiotest.Wave{{Ind: val, Amp: signalAmp}})
 	wr := c.audioOut.NewInput()
 	defer wr.Close()
@@ -698,8 +686,7 @@ func (c *Client) WaitSignals(ctx context.Context, vals []int, w io.WriteCloser) 
 		ws = webmm.NewPCM16Writer(w, sampleRate, 1, rtp.DefFrameDur)
 		defer ws.Close()
 	}
-	const framesPerSec = int(time.Second / rtp.DefFrameDur)
-	decoded := make(msdk.PCM16Sample, sampleRate/framesPerSec)
+	decoded := make(msdk.PCM16Sample, sampleRate/rtp.DefFramesPerSec)
 	dec := rtp.DecodePCM(msdk.NewPCM16BufferWriter(&decoded, sampleRate), c.audioCodec, c.audioType)
 	lastLog := time.Now()
 
@@ -800,13 +787,4 @@ func getResponse(tx sip.ClientTransaction) (*sip.Response, error) {
 			}
 		}
 	}
-}
-
-func parseSDPAnswer(in []byte) (string, int, error) {
-	offer := sdp.SessionDescription{}
-	if err := offer.Unmarshal(in); err != nil {
-		return "", 0, err
-	}
-
-	return offer.ConnectionInformation.Address.Address, offer.MediaDescriptions[0].MediaName.Port.Value, nil
 }

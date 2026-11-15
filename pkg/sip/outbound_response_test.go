@@ -41,10 +41,11 @@ func TestSIPResponseConsumesBufferedFinalAfterDone(t *testing.T) {
 				close(tx.responses)
 				close(tx.done)
 				var statuses []sip.StatusCode
-				response, err := sipResponse(context.Background(), tx, nil, func(status sip.StatusCode, _ Headers) {
+				response, cancelled, err := sipResponse(context.Background(), tx, nil, func(status sip.StatusCode, _ Headers) {
 					statuses = append(statuses, status)
 				})
 				require.NoError(t, err)
+				require.Empty(t, cancelled)
 				require.Same(t, final, response)
 				require.Equal(t, []sip.StatusCode{100, code}, statuses)
 			}
@@ -61,8 +62,9 @@ func TestSIPResponseDoneWithoutFinal(t *testing.T) {
 			}
 			close(tx.responses)
 			close(tx.done)
-			response, err := sipResponse(context.Background(), tx, nil, nil)
+			response, cancelled, err := sipResponse(context.Background(), tx, nil, nil)
 			require.Error(t, err)
+			require.Empty(t, cancelled)
 			require.Nil(t, response)
 			var incomplete transactionTimeoutError
 			require.ErrorAs(t, err, &incomplete)

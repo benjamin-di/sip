@@ -28,7 +28,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -234,7 +233,7 @@ func newTestPort(t testing.TB, log logger.Logger, conn UDPConn, opts *MediaOptio
 	t.Helper()
 	mp, err := NewMediaPortWith(log, newTestCallMonitor(t), conn, opts, rate)
 	require.NoError(t, err)
-	t.Cleanup(mp.Close)
+	t.Cleanup(mp.CloseWait)
 	return mp.(*mediaPort)
 }
 
@@ -458,7 +457,7 @@ func TestMediaPortAudioRoundTrip(t *testing.T) {
 							w1 := m1.GetOutboundAudioWriter()
 							w2 := m2.GetOutboundAudioWriter()
 
-							packetSize := targetRate / int(time.Second/rtp.DefFrameDur)
+							packetSize := targetRate / rtp.DefFramesPerSec
 							to2 := make(msdk.PCM16Sample, packetSize)
 							to1 := make(msdk.PCM16Sample, packetSize)
 							const (
@@ -484,6 +483,11 @@ func TestMediaPortAudioRoundTrip(t *testing.T) {
 							offsetSamples := codecConfig.offsetSamples
 
 							writes := 1 + rampUpFrames
+							if resample {
+								// Each direction passes two predictable resamplers (to the codec rate and back),
+								// and each holds back up to one frame of look-ahead until more input arrives.
+								writes += 2
+							}
 							discard := rampUpFrames * packetSize
 							resampleMult := targetRate / info.SampleRate
 							offsetSamples *= resampleMult
@@ -511,8 +515,10 @@ func TestMediaPortAudioRoundTrip(t *testing.T) {
 							m1.Close()
 							m2.Close()
 
-							checkPCM(t, "A -> B", to2[:packetSize-offsetSamples], recv2[discard+offsetSamples:])
-							checkPCM(t, "B -> A", to1[:packetSize-offsetSamples], recv1[discard+offsetSamples:])
+							require.GreaterOrEqual(t, len(recv2), discard+packetSize, "A -> B received a short window")
+							require.GreaterOrEqual(t, len(recv1), discard+packetSize, "B -> A received a short window")
+							checkPCM(t, "A -> B", to2[:packetSize-offsetSamples], recv2[discard+offsetSamples:discard+packetSize])
+							checkPCM(t, "B -> A", to1[:packetSize-offsetSamples], recv1[discard+offsetSamples:discard+packetSize])
 						})
 					}
 
@@ -857,35 +863,6 @@ func TestSymmetricRTP(t *testing.T) {
 		require.NotNil(t, curDstPtr)
 		require.Equal(t, newAddr.String(), curDstPtr.String())
 	})
-}
-
-// Test util for incrementing prometheus counter metrics.
-func gatherCounter(t testing.TB, name string, labels map[string]string) float64 {
-	t.Helper()
-	families, err := prometheus.DefaultGatherer.Gather()
-	require.NoError(t, err)
-	var total float64
-	for _, f := range families {
-		// Matching metric
-		if f.GetName() != name {
-			continue
-		}
-	metrics:
-		for _, m := range f.GetMetric() {
-			got := make(map[string]string, len(m.GetLabel()))
-			for _, l := range m.GetLabel() {
-				got[l.GetName()] = l.GetValue()
-			}
-			// Matching labels
-			for k, v := range labels {
-				if got[k] != v {
-					continue metrics
-				}
-			}
-			total += m.GetCounter().GetValue()
-		}
-	}
-	return total
 }
 
 // Report codecs offered during SDP even when the offer fails to match any codecs

@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode/utf8"
 
 	msdk "github.com/livekit/media-sdk"
 	"github.com/livekit/media-sdk/dtmf"
@@ -207,7 +208,7 @@ func (p *mediaPortPipeline) setupInput(mc *sdp.MediaConfig, audioToRoom msdk.PCM
 		mux.Register(d.Type, dtmfType)
 	}
 
-	var hnd rtp.HandlerCloser = newRTPStreamStats(mux, &p.conf.stats.MuxStats)
+	hnd := rtp.NewNopCloser(mux)
 	if p.conf.opts.EnableJitterBuffer {
 		// Renegotiation rebuilds the pipeline against the same stats, so a later
 		// buffer must add to the call totals rather than replace them.
@@ -217,8 +218,13 @@ func (p *mediaPortPipeline) setupInput(mc *sdp.MediaConfig, audioToRoom msdk.PCM
 			SSRCSwitches:     &p.conf.stats.JitterBufferSSRCSwitches,
 			Reordered:        &p.conf.stats.JitterBufferPacketsReordered,
 			SequenceRestarts: &p.conf.stats.JitterBufferSequenceRestarts,
+			Stray:            &p.conf.stats.JitterBufferPacketsStray,
+			Duplicate:        &p.conf.stats.JitterBufferPacketsDuplicate,
 		})...)
 	}
+	// Stream stats go before the jitter buffer, so they see the network arrival
+	// order and timing, not the buffer's reordered and paced output.
+	hnd = newRTPStreamStats(hnd, &p.conf.stats.MuxStats)
 	hnd = newLatencyRTPEntry(hnd, &inboundLatencyEntry)
 
 	p.muxToRoom.Store(&hnd)
@@ -273,7 +279,7 @@ func (p *mediaPortPipeline) setupOutput(mc *sdp.MediaConfig, incomingSampleRate 
 	codecInfo := mc.Audio.Info
 	w = newLatencyRTPExit(w, &outboundLatencyEntry, &p.conf.stats.LatencyOut)
 	w = newRTPStatsWriter(p.conf.mon, mc.Audio.Type, dtmfInfo.Type, codecInfo.SDPFullName(), dtmf.SDPNameOnly, w)
-	s := rtp.NewSeqWriter(w)
+	s := rtp.NewSeqWriter(w, codecInfo.RTPClockRate)
 	audioOutRTP := s.NewStream(mc.Audio.Type, codecInfo.RTPClockRate)
 
 	audioOut, err := rtp.EncodePCMWithCodec(audioOutRTP, mc.Audio.Codec, mc.Audio.Info.CodecConfig)
@@ -300,34 +306,41 @@ func (p *mediaPortPipeline) setupOutput(mc *sdp.MediaConfig, incomingSampleRate 
 	p.mixerToPort = audioOut
 
 	if dtmfInfo.Type != 0 || mode == "audio" {
-		var dtmfAudio msdk.PCM16Writer = nil
-		if mode != "rtp" {
-			// Add separate mixer for DTMF audio.
-			// TODO: optimize, if we'll ever need this code path
-			mix, err := mixer.NewMixer(audioOut, rtp.DefFrameDur, 1, mixer.WithOutputChannel())
+		var audioSwitch *msdk.WriteCloserSwitch[msdk.PCM16Sample]
+		dropAudioDuringDTMF := p.conf.opts.DropAudioDuringDTMF && mode != "audio"
+		if mode != "audio" && dtmfInfo.Info.RTPClockRate != codecInfo.RTPClockRate {
+			dropAudioDuringDTMF = true
+			p.conf.log.Infow("dropping audio during DTMF due to clock rate mismatch",
+				"audio-clock-rate", codecInfo.RTPClockRate, "dtmf-clock-rate", dtmfInfo.Info.RTPClockRate)
+		}
+		if dropAudioDuringDTMF {
+			audioSwitch = msdk.NewWriteCloserSwitch[msdk.PCM16Sample](p.mixerToPort.SampleRate())
+			_ = audioSwitch.Swap(p.mixerToPort)
+			p.mixerToPort = audioSwitch
+		}
+
+		var dtmfAudio msdk.PCM16Writer
+		if mode != "rtp" && !dropAudioDuringDTMF {
+			mix, err := mixer.NewMixer(p.mixerToPort, rtp.DefFrameDur, 1, mixer.WithOutputChannel())
 			if err != nil {
 				return err
 			}
-			audioOut = mix.NewInput()
+			p.mixerToPort = mix.NewInput()
 			dtmfAudio = mix.NewInput()
 			p.dtmfMixer = mix
-			p.mixerToPort = audioOut
 		}
 
 		var dtmfEvents *rtp.Stream
 		if mode != "audio" {
-			dtmfEvents = s.NewStream(dtmfInfo.Type, dtmfInfo.Info.RTPClockRate)
+			dtmfEvents = s.NewManualStream(dtmfInfo.Type)
 		}
 		p.dtmfToPort = &dtmfOutWriter{
-			log:        p.conf.log,
-			pcmRate:    dtmfInfo.Info.SampleRate,
-			ctx:        p.ctx,
-			dtmfEvents: dtmfEvents,
-			dtmfAudio:  dtmfAudio,
-			getTimestamp: func() uint32 {
-				audioTs := audioOutRTP.GetCurrentTimestamp()
-				return uint32(uint64(audioTs) * uint64(dtmfInfo.Info.RTPClockRate) / uint64(codecInfo.RTPClockRate))
-			},
+			log:         p.conf.log,
+			pcmRate:     dtmfInfo.Info.SampleRate,
+			ctx:         p.ctx,
+			dtmfEvents:  dtmfEvents,
+			dtmfAudio:   dtmfAudio,
+			audioSwitch: audioSwitch,
 		}
 	}
 	return nil
@@ -483,11 +496,11 @@ type dtmfOutWriter struct {
 	log     logger.Logger
 	pcmRate int
 
-	mu           sync.Mutex
-	ctx          context.Context // canceled by pipeline Close, aborts an in-flight digit train
-	dtmfEvents   *rtp.Stream
-	dtmfAudio    msdk.PCM16Writer
-	getTimestamp func() uint32
+	mu          sync.Mutex
+	ctx         context.Context // canceled by pipeline Close, aborts an in-flight digit train
+	dtmfEvents  *rtp.Stream
+	dtmfAudio   msdk.PCM16Writer
+	audioSwitch *msdk.WriteCloserSwitch[msdk.PCM16Sample] // if set, audio is disconnected while digits are sent
 }
 
 func (w *dtmfOutWriter) String() string {
@@ -511,11 +524,15 @@ func (w *dtmfOutWriter) WriteSample(sample string) error {
 	}
 	var errs []error
 	for i, digit := range sample {
-		if digit == 'w' { // Supported pause
+		if digit >= utf8.RuneSelf {
+			errs = append(errs, fmt.Errorf("invalid DTMF sample %q at position %d", digit, i))
+			continue
+		}
+		if digit == 'w' || digit == 'W' { // Supported pause
 			continue
 		}
 		if _, tones := dtmf.Tone(byte(digit)); len(tones) == 0 {
-			errs = append(errs, fmt.Errorf("invalid DTMF sample %v at position %d", digit, i))
+			errs = append(errs, fmt.Errorf("invalid DTMF sample %q at position %d", digit, i))
 		}
 	}
 	if len(errs) > 0 {
@@ -523,11 +540,16 @@ func (w *dtmfOutWriter) WriteSample(sample string) error {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	var rtpTs uint32
-	if w.dtmfEvents != nil {
-		rtpTs = w.getTimestamp() // TODO: Maybe time to introduce the auto timestamp feature?
+	if w.audioSwitch != nil {
+		prevWriter := w.audioSwitch.Swap(nil)
+		defer func() {
+			popped := w.audioSwitch.Swap(prevWriter)
+			if popped != nil {
+				panic("audioSwitch accessed outside of lock")
+			}
+		}()
 	}
-	err := dtmf.Write(w.ctx, w.dtmfAudio, w.dtmfEvents, w.pcmRate, rtpTs, sample)
+	err := dtmf.Write(w.ctx, w.dtmfAudio, w.dtmfEvents, w.pcmRate, sample)
 	if err != nil {
 		return err
 	}

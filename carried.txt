@@ -1,37 +1,30 @@
-Baseline: LiveKit SIP v1.21.0 (ee19da1a7ef178593e232a27365de7b4ba8f8829).
+Baseline: LiveKit SIP v1.24.0 (37d249f101234a8b7faef4ecb07393976b4ed681).
 
-Carried runtime patch: consume buffered final responses when a reliable
-SIP transaction closes. The stock regression test fails with buffered 200,
-401, 403 and 407 responses; the fix retains incomplete-transaction handling.
-The patch is also submitted against current upstream main. Drop it once a
-stable upstream release includes the fix, then return to the upstream image.
+Released carries removed after canonical race regressions passed:
+- #938 / 69e8aee3500de3094c012c0b9e8fd1ce3fb47a56: outbound logger enrichment.
+- #939 / 0030ed14270744815c4e59881538b7483d04243d: reconnect worker teardown.
+Both commits are ancestors of the selected release; their release tests remain.
 
-The fleet branch adds GitHub-hosted tests and an immutable GHCR image release.
-The inherited Docker Hub release workflow is disabled in this fork. Published
-images contain upstream code and these patches, with source/revision/version labels.
-No carrier configuration, application code, prompts or call data are carried.
+Retain buffered final responses (#923). The release's sipResponse still returns
+an incomplete transaction when Done wins over a queued final response. The
+adaptation preserves the new cancellation-reason result and its downstream events.
+Remove after an official release passes buffered 200/401/403/407 and incomplete
+transaction regressions.
 
-Public fork workflows carry the unchanged generic same-tree gate and exact-commit
-CI check scripts because GitHub does not allow a public workflow to use actions
-from a private repository. Refresh these copies when the shared checks change.
+Retain explicit RTP, audio and combined DTMF modes (#943), with complete receiver
+tests for ordered digits, end repeats and decoded G.711 frequency pairs. Preserve
+the release's manual RTP timestamp stream, input validation and audio-drop switch.
+Audio-only mode stays audible without telephone-event negotiation or an event
+clock; event-only mode must report missing negotiation. The canonical release's
+Media SDK 756e3cfaa8dd replaces the old 0de6c2e55d42 pin without a downgrade.
+Remove after a release exposes the modes and passes their receiver regressions.
 
-Carried runtime patch: explicit RTP, in-band and combined DTMF modes, with
-complete receiver tests for ordered digits, end repeats and decoded G.711
-frequency pairs. Missing event negotiation reports an error in RTP mode.
+Retain configurable mixer input buffering (#608 / #727). The release's shared
+call manager owns the room factory, so configuration is applied there while test
+and caller overrides remain supported. The default stays at five frames.
+Fake-clock starvation tests cover larger buffers retaining bursty audio.
+Remove when a release exposes the option and passes the starvation tests.
 
-Carried runtime patch: synchronize outbound logger enrichment with concurrent
-BYE/room callbacks. Keep its lock separate from the call-state lock.
-
-Media SDK pin: upstream 0de6c2e55d42 includes frame-aligned DTMF durations and
-8000 Hz offers. No private audio, carrier settings or telephone fixtures are used.
-
-Carried configuration patch: expose the upstream mixer's input buffer option for
-bursty WebRTC delivery (livekit/sip#608). The default remains upstream's 5 frames;
-operators can choose a bounded larger buffer with the associated latency cost.
-Fake-clock tests distinguish continuous speech starvation from ordinary silence.
-Remove the plumbing when a stable SIP release exposes this option itself.
-
-Carried shutdown patch: join reconnect subscription workers when closing the
-room. This fences new work after close and prevents asynchronous writes/logging
-from outliving the call or test fixture. Keep the SDK disconnect outside the
-registration lock. Drop once upstream room teardown owns these workers.
+Generic public CI and immutable image publishing support the remaining patches.
+The inherited Docker Hub publisher stays disabled. No application configuration,
+prompts, credentials, carrier settings or call data are carried.

@@ -416,8 +416,9 @@ func (d *sipUADialogTest) UnregisterRequestChannel(method string) {
 
 type serviceTest struct {
 	TestUA  *sipUATest
-	Server  *Server // Processing inbound calls and SIP
-	Client  *Client // Processing outbound calls
+	Server  *Server      // Processing inbound SIP
+	Manager *callManager // Processing inbound calls
+	Client  *Client      // Processing outbound calls
 	Handler Handler
 	Service *Service
 
@@ -482,23 +483,8 @@ func NewServiceTest(t *testing.T, options *serviceTestConfig) *serviceTest {
 	require.Equal(t, stats.HealthOK, mon.Health(), "monitor should be healthy")
 	log := logger.NewTestLogger(t)
 
-	cli := NewClient(
-		"",
-		conf,
-		log,
-		mon,
-		options.GetStateHandler,
-		WithGetRoomClient(options.GetRoom),
-	)
-	srv := NewServer(
-		"",
-		conf,
-		log,
-		mon,
-		options.GetStateHandler,
-		WithGetRoomServer(options.GetRoom),
-		WithClient(cli),
-	)
+	cli := NewClient(conf, log)
+	srv := NewServer(conf, log)
 	require.NotNil(t, srv)
 
 	sconf := &ServiceConfig{
@@ -507,31 +493,45 @@ func NewServiceTest(t *testing.T, options *serviceTestConfig) *serviceTest {
 		MediaIP:          loopback,
 	}
 
+	manager := newCallManager(
+		srv,
+		cli,
+		"",
+		conf,
+		sconf,
+		log,
+		mon,
+		newTestNonces(t),
+		options.GetStateHandler,
+		WithGetRoom(options.GetRoom),
+	)
+
 	handler := &TestHandler{}
 
-	err = srv.Start(nil, sconf, nil, cli.OnRequest)
+	err = srv.Start(nil, sconf, nil, manager)
 	require.NoError(t, err)
 	t.Cleanup(srv.Stop)
-	srv.SetHandler(handler)
+	manager.SetHandler(handler)
 
 	err = cli.Start(nil, sconf)
 	require.NoError(t, err)
 	t.Cleanup(cli.Stop)
-	cli.SetHandler(handler)
+	t.Cleanup(manager.Stop)
 
 	addr := netip.AddrPortFrom(loopback, uint16(sipPort))
 
 	service := &Service{
-		conf:             conf,
-		log:              log,
-		mon:              mon,
-		cli:              cli,
-		srv:              srv,
-		pendingTransfers: make(map[LocalTag]*PendingTransfer),
+		conf:    conf,
+		log:     log,
+		mon:     mon,
+		cli:     cli,
+		srv:     srv,
+		manager: manager,
 	}
 	s := &serviceTest{
 		TestUA:  newUATest(t, srv.log, addr, withUATestBuffer(64)),
 		Server:  srv,
+		Manager: manager,
 		Client:  cli,
 		Handler: handler,
 		Service: service,
@@ -629,9 +629,9 @@ func (st *serviceTest) CreateInboundCall(t *testing.T, opts ...createCallTestOpt
 		st.TestUA.TransactionRequest(t, bye, true)
 	})
 
-	st.Server.cmu.Lock()
-	defer st.Server.cmu.Unlock()
-	ic, ok := st.Server.byLocalTag[call.remoteTag]
+	st.Manager.cmu.RLock()
+	defer st.Manager.cmu.RUnlock()
+	ic, ok := st.Manager.byLocalTag[call.remoteTag]
 	require.True(t, ok, "call should be registered")
 
 	t.Logf("inbound call: %+v", call)
@@ -658,7 +658,7 @@ func (st *serviceTest) CreateOutboundCall(t *testing.T, opts ...createCallTestOp
 		st.mu.Unlock()
 	}()
 
-	_, err := st.Client.CreateSIPParticipant(ctx, req)
+	_, err := st.Manager.CreateSIPParticipant(ctx, req)
 	require.NoError(t, err)
 
 	var reqSink <-chan *sipUARequest
@@ -710,9 +710,9 @@ func (st *serviceTest) CreateOutboundCall(t *testing.T, opts ...createCallTestOp
 		st.TestUA.TransactionRequest(t, bye, false)
 	})
 
-	st.Client.cmu.Lock()
-	defer st.Client.cmu.Unlock()
-	oc, ok := st.Client.activeCalls[call.remoteTag]
+	st.Manager.cmu.RLock()
+	defer st.Manager.cmu.RUnlock()
+	oc, ok := st.Manager.activeCalls[call.remoteTag]
 	require.True(t, ok, "call should be registered")
 
 	t.Logf("outbound call: %+v", call)
@@ -721,16 +721,16 @@ func (st *serviceTest) CreateOutboundCall(t *testing.T, opts ...createCallTestOp
 
 func lookupCall(t *testing.T, st *serviceTest, call *sipUADialogTest) (RoomInterface, MediaPort) {
 	t.Helper()
-	st.Server.cmu.Lock()
-	ic := st.Server.byLocalTag[call.remoteTag]
-	st.Server.cmu.Unlock()
+	st.Manager.cmu.RLock()
+	ic := st.Manager.byLocalTag[call.remoteTag]
+	st.Manager.cmu.RUnlock()
 	if ic != nil {
 		require.Eventually(t, ic.started.IsBroken, 5*time.Second, 10*time.Millisecond, "inbound call should become active")
 		return ic.lkRoom, ic.media
 	}
-	st.Client.cmu.Lock()
-	oc := st.Client.activeCalls[call.remoteTag]
-	st.Client.cmu.Unlock()
+	st.Manager.cmu.RLock()
+	oc := st.Manager.activeCalls[call.remoteTag]
+	st.Manager.cmu.RUnlock()
 	require.NotNil(t, oc, "call should be registered as inbound or outbound")
 	require.Eventually(t, oc.started.IsBroken, 5*time.Second, 10*time.Millisecond, "outbound call should become active")
 	return oc.lkRoom, oc.media
@@ -1090,16 +1090,16 @@ func TestTransfer(t *testing.T) {
 		err  error
 	}
 
-	startTransferFull := func(t *testing.T, ctx context.Context, st *serviceTest, call *sipUADialogTest, to string, headers map[string]string, dialtone bool) <-chan transferAPIResult {
+	startTransferFull := func(t *testing.T, ctx context.Context, st *serviceTest, call *sipUADialogTest, to string, headers map[string]string, dialtone livekit.SIPDialtone) <-chan transferAPIResult {
 		t.Helper()
 		done := make(chan transferAPIResult, 1)
 		go func() {
 			defer close(done)
 			transferReq := &rpc.InternalTransferSIPParticipantRequest{
-				SipCallId:    string(call.remoteTag),
-				TransferTo:   to,
-				Headers:      headers,
-				PlayDialtone: dialtone,
+				SipCallId:  string(call.remoteTag),
+				TransferTo: to,
+				Headers:    headers,
+				Dialtone:   dialtone,
 			}
 			if deadline, ok := ctx.Deadline(); ok {
 				transferReq.RingingTimeout = durationpb.New(time.Until(deadline) + (5 * time.Millisecond))
@@ -1111,7 +1111,7 @@ func TestTransfer(t *testing.T) {
 	}
 
 	// startTransfer reports only the error, which is all most subtests care about.
-	startTransfer := func(t *testing.T, ctx context.Context, st *serviceTest, call *sipUADialogTest, to string, headers map[string]string, dialtone bool) <-chan error {
+	startTransfer := func(t *testing.T, ctx context.Context, st *serviceTest, call *sipUADialogTest, to string, headers map[string]string, dialtone livekit.SIPDialtone) <-chan error {
 		t.Helper()
 		full := startTransferFull(t, ctx, st, call, to, headers, dialtone)
 		done := make(chan error, 1)
@@ -1157,7 +1157,7 @@ func TestTransfer(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), time.Second*3)
 				defer cancel()
 
-				transferRes := startTransfer(t, ctx, st, call, referTo, nil, false)
+				transferRes := startTransfer(t, ctx, st, call, referTo, nil, livekit.SIPDialtone_SIP_DIALTONE_DISABLED)
 
 				err := handleRefer(t, ctx, reqChan, call, 202, expectHeaders(referTo, nil))
 				require.NoError(t, err, "Failed to process REFER request")
@@ -1185,7 +1185,7 @@ func TestTransfer(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), time.Second*3)
 				defer cancel()
 
-				transferRes := startTransferFull(t, ctx, st, call, referTo, nil, false)
+				transferRes := startTransferFull(t, ctx, st, call, referTo, nil, livekit.SIPDialtone_SIP_DIALTONE_DISABLED)
 
 				err := handleRefer(t, ctx, reqChan, call, 202, expectHeaders(referTo, nil))
 				require.NoError(t, err, "Failed to process REFER request")
@@ -1219,9 +1219,9 @@ func TestTransfer(t *testing.T) {
 				defer cancel()
 
 				transferResults := []<-chan error{
-					startTransfer(t, ctx, st, call, referTo, nil, false),
-					startTransfer(t, ctx, st, call, referTo, nil, false),
-					startTransfer(t, ctx, st, call, referTo, nil, false),
+					startTransfer(t, ctx, st, call, referTo, nil, livekit.SIPDialtone_SIP_DIALTONE_DISABLED),
+					startTransfer(t, ctx, st, call, referTo, nil, livekit.SIPDialtone_SIP_DIALTONE_DISABLED),
+					startTransfer(t, ctx, st, call, referTo, nil, livekit.SIPDialtone_SIP_DIALTONE_DISABLED),
 				}
 
 				err := handleRefer(t, ctx, reqChan, call, 202, expectHeaders(referTo, nil))
@@ -1253,7 +1253,7 @@ func TestTransfer(t *testing.T) {
 				headers := map[string]string{
 					"X-Custom-Header": "custom-value",
 				}
-				transferRes := startTransfer(t, ctx, st, call, referTo, headers, false)
+				transferRes := startTransfer(t, ctx, st, call, referTo, headers, livekit.SIPDialtone_SIP_DIALTONE_DISABLED)
 
 				err := handleRefer(t, ctx, reqChan, call, 202, expectHeaders(referTo, headers))
 				require.NoError(t, err, "Failed to process REFER request")
@@ -1282,7 +1282,7 @@ func TestTransfer(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), time.Second*3)
 				defer cancel()
 
-				transferRes := startTransfer(t, ctx, st, call, referTo, nil, false)
+				transferRes := startTransfer(t, ctx, st, call, referTo, nil, livekit.SIPDialtone_SIP_DIALTONE_DISABLED)
 
 				err := handleRefer(t, ctx, reqChan, call, 202, expectHeaders(referTo, nil))
 				require.NoError(t, err, "Failed to process REFER request")
@@ -1325,9 +1325,9 @@ func TestTransfer(t *testing.T) {
 				defer cancel()
 
 				transferResults := []<-chan error{
-					startTransfer(t, ctx, st, call, referTo, nil, false),
-					startTransfer(t, ctx, st, call, referTo, nil, false),
-					startTransfer(t, ctx, st, call, referTo, nil, false),
+					startTransfer(t, ctx, st, call, referTo, nil, livekit.SIPDialtone_SIP_DIALTONE_DISABLED),
+					startTransfer(t, ctx, st, call, referTo, nil, livekit.SIPDialtone_SIP_DIALTONE_DISABLED),
+					startTransfer(t, ctx, st, call, referTo, nil, livekit.SIPDialtone_SIP_DIALTONE_DISABLED),
 				}
 
 				err := handleRefer(t, ctx, reqChan, call, 202, expectHeaders(referTo, nil))
@@ -1361,8 +1361,8 @@ func TestTransfer(t *testing.T) {
 
 			t.Run("dialtone", func(t *testing.T) {
 				// While a dial-tone transfer is pending the SIP participant hears
-				// the ring tone instead of the room. A failed transfer puts the
-				// room audio back.
+				// the requested regional ring tone instead of the room. A failed
+				// transfer puts the room audio back.
 				const finalNotifyStatus = 480
 
 				t.Parallel()
@@ -1378,7 +1378,7 @@ func TestTransfer(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), time.Second*3)
 				defer cancel()
 
-				transferRes := startTransfer(t, ctx, st, call, referTo, nil, true)
+				transferRes := startTransfer(t, ctx, st, call, referTo, nil, livekit.SIPDialtone_SIP_DIALTONE_US)
 
 				err := handleRefer(t, ctx, reqChan, call, 202, expectHeaders(referTo, nil))
 				require.NoError(t, err, "Failed to process REFER request")
@@ -1404,6 +1404,7 @@ func TestTransfer(t *testing.T) {
 			t.Run("dialtone_room_detached", func(t *testing.T) {
 				// Regression test to ensure that a nil outbound audio writer of
 				// a room doesn't cause a panic cause a panic when a transfer happens.
+				// The request only sets the deprecated play_dialtone, as older api servers do.
 				t.Parallel()
 				call := setupCall(t, st)
 				room, media := lookupCall(t, st, call)
@@ -1416,7 +1417,20 @@ func TestTransfer(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), time.Second*3)
 				defer cancel()
 
-				transferRes := startTransfer(t, ctx, st, call, referTo, nil, true)
+				transferRes := make(chan error, 1)
+				go func() {
+					defer close(transferRes)
+					deadline, _ := ctx.Deadline()
+					_, err := st.Service.TransferSIPParticipant(ctx, &rpc.InternalTransferSIPParticipantRequest{
+						SipCallId:      string(call.remoteTag),
+						TransferTo:     referTo,
+						PlayDialtone:   true,
+						RingingTimeout: durationpb.New(time.Until(deadline) + (5 * time.Millisecond)),
+					})
+					if err != nil {
+						transferRes <- err
+					}
+				}()
 
 				err := handleRefer(t, ctx, reqChan, call, 202, expectHeaders(referTo, nil))
 				require.NoError(t, err, "Failed to process REFER request")
@@ -1449,7 +1463,7 @@ func TestTransfer(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), time.Second*3)
 				defer cancel()
 
-				transferRes := startTransfer(t, ctx, st, call, referTo, nil, false)
+				transferRes := startTransfer(t, ctx, st, call, referTo, nil, livekit.SIPDialtone_SIP_DIALTONE_DISABLED)
 
 				err := handleRefer(t, ctx, reqChan, call, referStatus, expectHeaders(referTo, nil))
 				require.NoError(t, err, "Failed to process REFER request")
@@ -1480,7 +1494,7 @@ func TestTransfer(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 				defer cancel()
 
-				transferRes := startTransfer(t, ctx, st, call, referTo, nil, false)
+				transferRes := startTransfer(t, ctx, st, call, referTo, nil, livekit.SIPDialtone_SIP_DIALTONE_DISABLED)
 
 				err := handleRefer(t, ctx, reqChan, call, 202, expectHeaders(referTo, nil))
 				require.NoError(t, err, "Failed to process REFER request")
@@ -1514,7 +1528,7 @@ func TestTransfer(t *testing.T) {
 				headers := map[string]string{
 					"X-Custom-Header": "custom-value",
 				}
-				transferRes := startTransferFull(t, ctx, st, call, referTo, headers, false)
+				transferRes := startTransferFull(t, ctx, st, call, referTo, headers, livekit.SIPDialtone_SIP_DIALTONE_DISABLED)
 
 				err := handleRefer(t, ctx, reqChan, call, 202, expectHeaders(referTo, headers))
 				require.NoError(t, err, "Failed to process REFER request")
@@ -1552,7 +1566,7 @@ func TestTransfer(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), time.Second*5)
 				defer cancel()
 
-				transferRes := startTransfer(t, ctx, st, call, referTo, nil, false)
+				transferRes := startTransfer(t, ctx, st, call, referTo, nil, livekit.SIPDialtone_SIP_DIALTONE_DISABLED)
 
 				err := handleRefer(t, ctx, reqChan, call, 202, expectHeaders(referTo, nil))
 				require.NoError(t, err, "Failed to process REFER request")
@@ -1596,7 +1610,7 @@ func TestTransfer(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), time.Second*3)
 				defer cancel()
 
-				transferRes := startTransfer(t, ctx, st, call, referTo, nil, false)
+				transferRes := startTransfer(t, ctx, st, call, referTo, nil, livekit.SIPDialtone_SIP_DIALTONE_DISABLED)
 
 				err := handleRefer(t, ctx, reqChan, call, 202, expectHeaders(referTo, nil))
 				require.NoError(t, err, "Failed to process REFER request")
@@ -1636,7 +1650,7 @@ func TestTransfer(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), time.Second*3)
 				defer cancel()
 
-				transferRes := startTransfer(t, ctx, st, call, referTo, nil, false)
+				transferRes := startTransfer(t, ctx, st, call, referTo, nil, livekit.SIPDialtone_SIP_DIALTONE_DISABLED)
 
 				err := handleRefer(t, ctx, reqChan, call, 202, expectHeaders(referTo, nil))
 				require.NoError(t, err, "Failed to process REFER request")
@@ -1668,7 +1682,7 @@ func TestTransfer(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), time.Second*3)
 				defer cancel()
 
-				transferRes := startTransfer(t, ctx, st, call, referTo, nil, false)
+				transferRes := startTransfer(t, ctx, st, call, referTo, nil, livekit.SIPDialtone_SIP_DIALTONE_DISABLED)
 
 				err := handleRefer(t, ctx, reqChan, call, 202, expectHeaders(referTo, nil))
 				require.NoError(t, err, "Failed to process REFER request")
@@ -1779,7 +1793,7 @@ func TestRouteSet(t *testing.T) {
 			transferRes := make(chan error, 1)
 			go func() {
 				defer close(transferRes)
-				_, err := ic.transferCall(ctx, "tel:+15551234567", nil, false)
+				_, err := ic.transferCall(ctx, "tel:+15551234567", nil, livekit.SIPDialtone_SIP_DIALTONE_DISABLED)
 				transferRes <- err
 			}()
 
@@ -1864,7 +1878,7 @@ func TestRouteSet(t *testing.T) {
 			transferRes := make(chan error, 1)
 			go func() {
 				defer close(transferRes)
-				_, err := oc.transferCall(ctx, "tel:+15551234567", nil, false)
+				_, err := oc.transferCall(ctx, "tel:+15551234567", nil, livekit.SIPDialtone_SIP_DIALTONE_DISABLED)
 				transferRes <- err
 			}()
 
@@ -1952,7 +1966,7 @@ func TestRetransmission(t *testing.T) {
 			st.mu.Unlock()
 		}()
 
-		_, err := st.Client.CreateSIPParticipant(ctx, req)
+		_, err := st.Manager.CreateSIPParticipant(ctx, req)
 		require.NoError(t, err)
 
 		var msg *sipUARequest

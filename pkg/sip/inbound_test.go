@@ -17,6 +17,7 @@ package sip
 import (
 	"context"
 	"errors"
+	"net"
 	"net/netip"
 	"testing"
 	"time"
@@ -141,9 +142,9 @@ func (c *lateOfferCall) expectOffer(t *testing.T, ctx context.Context) {
 	c.call.SetRemoteSDP(resp.Body())
 	c.call.SetRouteSet(resp, true)
 
-	c.st.Server.cmu.Lock()
-	c.ic, ok = c.st.Server.byLocalTag[c.call.remoteTag]
-	c.st.Server.cmu.Unlock()
+	c.st.Manager.cmu.RLock()
+	c.ic, ok = c.st.Manager.byLocalTag[c.call.remoteTag]
+	c.st.Manager.cmu.RUnlock()
 	require.True(t, ok, "call should be registered")
 }
 
@@ -267,21 +268,21 @@ func TestInboundLateOfferDisabled(t *testing.T) {
 	c := inviteWithoutOffer(t, st)
 	resp := getFinalResponseOrFail(t, ctx, c.tx)
 	// Same rejection as before late offer support: negotiating an empty offer fails.
-	require.Equal(t, sip.StatusBadRequest, resp.StatusCode, "offerless INVITE should be rejected when late offer is disabled")
+	require.Equal(t, sip.StatusNotAcceptableHere, resp.StatusCode, "offerless INVITE should be rejected when late offer is disabled")
 	require.Empty(t, resp.Body(), "rejection must not carry an offer")
 
 	// The response is sent before the call is deregistered.
 	require.Eventually(t, func() bool {
-		st.Server.cmu.RLock()
-		defer st.Server.cmu.RUnlock()
-		return len(st.Server.byLocalTag) == 0
+		st.Manager.cmu.RLock()
+		defer st.Manager.cmu.RUnlock()
+		return len(st.Manager.byLocalTag) == 0
 	}, 5*time.Second, 10*time.Millisecond, "rejected call should be deregistered")
 }
 
 func TestInboundLateOffer(t *testing.T) {
 	st := NewServiceTest(t, nil)
 	// Enable late offer at the project level.
-	st.Server.SetHandler(&TestHandler{FeatureFlags: map[string]string{lateOfferFeatureFlag: "true"}})
+	st.Manager.SetHandler(&TestHandler{FeatureFlags: map[string]string{lateOfferFeatureFlag: "true"}})
 	callerRTP := netip.MustParseAddrPort("127.0.0.1:2827")
 
 	t.Run("success", func(t *testing.T) {
@@ -541,8 +542,7 @@ func TestInboundCallStatusCode(t *testing.T) {
 				sct.roomFunc = nil
 				handler := &TestHandler{}
 				sct.serviceTest.Handler = handler
-				sct.serviceTest.Server.handler = handler
-				sct.serviceTest.Client.handler = handler
+				sct.serviceTest.Manager.handler = handler
 			})
 		}
 
@@ -753,7 +753,7 @@ func TestInboundCallStatusCode(t *testing.T) {
 
 		c := inviteWithoutOffer(t, st.serviceTest)
 		res := getFinalResponseOrFail(t, ctx, c.tx)
-		require.Equal(t, sip.StatusBadRequest, res.StatusCode, "offerless INVITE should be rejected when late offer is disabled")
+		require.Equal(t, sip.StatusNotAcceptableHere, res.StatusCode, "offerless INVITE should be rejected when late offer is disabled")
 
 		require.Eventually(t, func() bool {
 			last := states.Last()
@@ -897,9 +897,9 @@ func TestInboundCallStatusCode(t *testing.T) {
 		require.True(t, ok, "remote tag should be present")
 		call.SetRemoteTag(LocalTag(remoteTag))
 
-		st.Server.cmu.Lock()
-		ic, ok := st.Server.byLocalTag[call.remoteTag]
-		st.Server.cmu.Unlock()
+		st.Manager.cmu.RLock()
+		ic, ok := st.Manager.byLocalTag[call.remoteTag]
+		st.Manager.cmu.RUnlock()
 		require.True(t, ok, "call should be registered")
 
 		// Drop the INVITE transaction while the call is still ringing, as a BYE
@@ -949,9 +949,9 @@ func TestInboundCallStatusCode(t *testing.T) {
 		require.True(t, ok, "remote tag should be present")
 		call.SetRemoteTag(LocalTag(remoteTag))
 
-		st.Server.cmu.Lock()
-		ic, ok := st.Server.byLocalTag[call.remoteTag]
-		st.Server.cmu.Unlock()
+		st.Manager.cmu.RLock()
+		ic, ok := st.Manager.byLocalTag[call.remoteTag]
+		st.Manager.cmu.RUnlock()
 		require.True(t, ok, "call should be registered")
 
 		// Let the answer reach the caller, then break the transport under the
@@ -1026,4 +1026,92 @@ func TestInboundCallStatusCode(t *testing.T) {
 			require.EqualValues(t, tc.exp, ended.CallStatusCode.Code)
 		})
 	}
+}
+
+// Inbound calls set the provider after the join timer starts.
+func TestInboundProviderLabel(t *testing.T) {
+	joinMetric := "livekit_sip_dur_join_sec"
+	labels := map[string]string{"dir": "in", "provider": "internal/xyz_carrier"}
+	before := gatherHistogramCount(t, joinMetric, labels)
+
+	mon := newTestCallMonitor(t)
+	done := mon.JoinDur()
+	mon.SetProvider("internal/xyz_carrier")
+	done()
+
+	require.Equal(t, before+1, gatherHistogramCount(t, joinMetric, labels))
+}
+
+func overTCP(req *sip.Request, _ *sip.Response) {
+	req.SetTransport("TCP")
+}
+
+func withContact(u sip.Uri) createCallTestOption {
+	return func(req *sip.Request, _ *sip.Response) {
+		req.RemoveHeader("Contact")
+		req.AppendHeader(&sip.ContactHeader{Address: u})
+	}
+}
+
+func inviteConnOpen(ic *inboundCall) bool {
+	ic.cc.mu.RLock()
+	defer ic.cc.mu.RUnlock()
+	return ic.cc.inviteConnOpen()
+}
+
+func expectBye(t *testing.T, byes <-chan *sipUARequest, status sip.StatusCode, reason string) *sip.Request {
+	t.Helper()
+	select {
+	case msg := <-byes:
+		require.NoError(t, msg.tx.Respond(sip.NewResponseFromRequest(msg.req, status, reason, nil)))
+		return msg.req
+	case <-time.After(5 * time.Second):
+		t.Fatal("no BYE from server")
+		return nil
+	}
+}
+
+func closeAndExpectBye(t *testing.T, call *sipUADialogTest, ic *inboundCall) {
+	t.Helper()
+	byes := call.RegisterRequestChannel("BYE")
+	require.NoError(t, ic.Close())
+	expectBye(t, byes, 200, "OK")
+}
+
+func TestInboundByeOverInviteConnection(t *testing.T) {
+	st := NewServiceTest(t, nil)
+
+	t.Run("unreachable Contact", func(t *testing.T) {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		contact := sip.Uri{Scheme: "sip", Host: "127.0.0.1", Port: l.Addr().(*net.TCPAddr).Port}
+		require.NoError(t, l.Close())
+
+		call, ic := st.CreateInboundCall(t, overTCP, withContact(contact))
+		closeAndExpectBye(t, call, ic)
+	})
+
+	t.Run("peer closed the INVITE connection", func(t *testing.T) {
+		call, ic := st.CreateInboundCall(t, overTCP)
+		conn, err := st.TestUA.UA.TransportLayer().GetConnection("tcp", st.Address())
+		require.NoError(t, err)
+		require.NoError(t, conn.Close())
+		require.Eventually(t, func() bool { return !inviteConnOpen(ic) }, 2*time.Second, 10*time.Millisecond)
+		closeAndExpectBye(t, call, ic)
+	})
+
+	t.Run("rejected on the INVITE connection", func(t *testing.T) {
+		call, ic := st.CreateInboundCall(t, overTCP)
+		byes := call.RegisterRequestChannel("BYE")
+		require.NoError(t, ic.Close())
+		first := expectBye(t, byes, 404, "Not Found")
+		second := expectBye(t, byes, 200, "OK")
+		require.NotEqual(t, first.Source(), second.Source())
+		require.Greater(t, second.CSeq().SeqNo, first.CSeq().SeqNo)
+	})
+
+	t.Run("UDP", func(t *testing.T) {
+		_, ic := st.CreateInboundCall(t)
+		require.False(t, inviteConnOpen(ic))
+	})
 }

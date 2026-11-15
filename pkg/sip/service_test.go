@@ -163,14 +163,17 @@ func testInvite(t *testing.T, h Handler, hidden bool, from, to string, test func
 
 	// Use a no-op logger to avoid panics from async logging after test completion
 	log := logger.NewTestLogger(t)
-	s, err := NewService("", &config.Config{
+	conf := &config.Config{
 		HideInboundPort: hidden,
 		SIPPort:         sipPort,
 		SIPPortListen:   sipPort,
 		RTPPort:         rtcconfig.PortRange{Start: testPortRTPMin, End: testPortRTPMax},
-	}, mon, log, func(projectID string, _ *rpc.SIPCallObservability, _ *livekit.SIPCallInfo) StateHandler {
+	}
+	manager, err := NewCallManager("", conf, log, mon, newTestNonces(t), func(projectID string, _ *rpc.SIPCallObservability, _ *livekit.SIPCallInfo) StateHandler {
 		return NewRPCStateHandler(nil)
-	}, serverOpts...)
+	})
+	require.NoError(t, err)
+	s, err := NewService(conf, mon, log, manager, serverOpts...)
 	require.NoError(t, err)
 	require.NotNil(t, s)
 	t.Cleanup(s.Stop)
@@ -381,13 +384,16 @@ func TestService_RejectedInviteCacheReplay(t *testing.T) {
 	require.NoError(t, err)
 
 	log := logger.LogRLogger(logr.Discard())
-	s, err := NewService("", &config.Config{
+	conf := &config.Config{
 		SIPPort:       sipPort,
 		SIPPortListen: sipPort,
 		RTPPort:       rtcconfig.PortRange{Start: testPortRTPMin, End: testPortRTPMax},
-	}, mon, log, func(projectID string, _ *rpc.SIPCallObservability, _ *livekit.SIPCallInfo) StateHandler {
+	}
+	manager, err := NewCallManager("", conf, log, mon, newTestNonces(t), func(projectID string, _ *rpc.SIPCallObservability, _ *livekit.SIPCallInfo) StateHandler {
 		return NewRPCStateHandler(nil)
 	})
+	require.NoError(t, err)
+	s, err := NewService(conf, mon, log, manager)
 	require.NoError(t, err)
 	require.NotNil(t, s)
 	s.SetHandler(h)
@@ -481,13 +487,16 @@ func TestService_OnSessionEnd(t *testing.T) {
 
 	// Use a no-op logger to avoid panics from async logging after test completion
 	log := logger.LogRLogger(logr.Discard())
-	s, err := NewService("", &config.Config{
+	conf := &config.Config{
 		SIPPort:       sipPort,
 		SIPPortListen: sipPort,
 		RTPPort:       rtcconfig.PortRange{Start: testPortRTPMin, End: testPortRTPMax},
-	}, mon, log, func(projectID string, _ *rpc.SIPCallObservability, _ *livekit.SIPCallInfo) StateHandler {
+	}
+	manager, err := NewCallManager("", conf, log, mon, newTestNonces(t), func(projectID string, _ *rpc.SIPCallObservability, _ *livekit.SIPCallInfo) StateHandler {
 		return NewRPCStateHandler(nil)
 	})
+	require.NoError(t, err)
+	s, err := NewService(conf, mon, log, manager)
 	require.NoError(t, err)
 	require.NotNil(t, s)
 	t.Cleanup(s.Stop)
@@ -580,14 +589,17 @@ func TestService_Interceptors(t *testing.T) {
 
 	// Use a no-op logger to avoid panics from async logging after test completion
 	log := logger.LogRLogger(logr.Discard())
-	s, err := NewService("", &config.Config{
+	conf := &config.Config{
 		HideInboundPort: false,
 		SIPPort:         sipPort,
 		SIPPortListen:   sipPort,
 		RTPPort:         rtcconfig.PortRange{Start: testPortRTPMin, End: testPortRTPMax},
-	}, mon, log, func(projectID string, _ *rpc.SIPCallObservability, _ *livekit.SIPCallInfo) StateHandler {
+	}
+	manager, err := NewCallManager("", conf, log, mon, newTestNonces(t), func(projectID string, _ *rpc.SIPCallObservability, _ *livekit.SIPCallInfo) StateHandler {
 		return NewRPCStateHandler(nil)
-	}, WithInterceptors(sentinel, recorder.loggingInterceptor("a"), recorder.loggingInterceptor("b")))
+	})
+	require.NoError(t, err)
+	s, err := NewService(conf, mon, log, manager, WithInterceptors(sentinel, recorder.loggingInterceptor("a"), recorder.loggingInterceptor("b")))
 	require.NoError(t, err)
 	require.NotNil(t, s)
 	t.Cleanup(s.Stop)
@@ -681,14 +693,17 @@ func TestDigestAuthSimultaneousCalls(t *testing.T) {
 
 	// Use a no-op logger to avoid panics from async logging after test completion
 	log := logger.LogRLogger(logr.Discard())
-	s, err := NewService("", &config.Config{
+	conf := &config.Config{
 		HideInboundPort: false, // Enable authentication
 		SIPPort:         sipPort,
 		SIPPortListen:   sipPort,
 		RTPPort:         rtcconfig.PortRange{Start: testPortRTPMin, End: testPortRTPMax},
-	}, mon, log, func(projectID string, _ *rpc.SIPCallObservability, _ *livekit.SIPCallInfo) StateHandler {
+	}
+	manager, err := NewCallManager("", conf, log, mon, newTestNonces(t), func(projectID string, _ *rpc.SIPCallObservability, _ *livekit.SIPCallInfo) StateHandler {
 		return NewRPCStateHandler(nil)
 	})
+	require.NoError(t, err)
+	s, err := NewService(conf, mon, log, manager)
 	require.NoError(t, err)
 	require.NotNil(t, s)
 	t.Cleanup(s.Stop)
@@ -890,14 +905,17 @@ func TestDigestAuthStandardFlow(t *testing.T) {
 
 	// Use a no-op logger to avoid panics from async logging after test completion
 	log := logger.LogRLogger(logr.Discard())
-	s, err := NewService("", &config.Config{
+	conf := &config.Config{
 		HideInboundPort: false, // Enable authentication
 		SIPPort:         sipPort,
 		SIPPortListen:   sipPort,
 		RTPPort:         rtcconfig.PortRange{Start: testPortRTPMin, End: testPortRTPMax},
-	}, mon, log, func(projectID string, _ *rpc.SIPCallObservability, _ *livekit.SIPCallInfo) StateHandler {
+	}
+	manager, err := NewCallManager("", conf, log, mon, newTestNonces(t), func(projectID string, _ *rpc.SIPCallObservability, _ *livekit.SIPCallInfo) StateHandler {
 		return NewRPCStateHandler(nil)
 	})
+	require.NoError(t, err)
+	s, err := NewService(conf, mon, log, manager)
 	require.NoError(t, err)
 	require.NotNil(t, s)
 	t.Cleanup(s.Stop)
@@ -1092,14 +1110,17 @@ func TestSameCallIDForAuthFlow(t *testing.T) {
 	mon, err := stats.NewMonitor(&config.Config{MaxCpuUtilization: 0.9})
 	require.NoError(t, err)
 
-	s, err := NewService("", &config.Config{
+	conf := &config.Config{
 		HideInboundPort: false, // Enable authentication
 		SIPPort:         sipPort,
 		SIPPortListen:   sipPort,
 		RTPPort:         rtcconfig.PortRange{Start: testPortRTPMin, End: testPortRTPMax},
-	}, mon, log, func(projectID string, _ *rpc.SIPCallObservability, _ *livekit.SIPCallInfo) StateHandler {
+	}
+	manager, err := NewCallManager("", conf, log, mon, newTestNonces(t), func(projectID string, _ *rpc.SIPCallObservability, _ *livekit.SIPCallInfo) StateHandler {
 		return NewRPCStateHandler(nil)
 	})
+	require.NoError(t, err)
+	s, err := NewService(conf, mon, log, manager)
 	require.NoError(t, err)
 	require.NotNil(t, s)
 
@@ -1206,18 +1227,26 @@ func TestSameCallIDForAuthFlow(t *testing.T) {
 // suitable for testing CreateSIPParticipantAffinity without network setup.
 func newServiceForAffinity(conf *config.Config) *Service {
 	cli := &Client{
-		conf:        conf,
-		activeCalls: make(map[LocalTag]*outboundCall),
+		conf: conf,
 	}
 	srv := &Server{
-		conf:       conf,
-		byLocalTag: make(map[LocalTag]*inboundCall),
+		conf: conf,
+	}
+	manager := &callManager{
+		conf:        conf,
+		byLocalTag:  make(map[LocalTag]*inboundCall),
+		activeCalls: make(map[LocalTag]*outboundCall),
 	}
 	return &Service{
-		conf: conf,
-		cli:  cli,
-		srv:  srv,
+		conf:    conf,
+		cli:     cli,
+		srv:     srv,
+		manager: manager,
 	}
+}
+
+func (s *Service) cm() *callManager {
+	return s.manager.(*callManager)
 }
 
 func TestCreateSIPParticipantAffinity_NoConfig_NoCalls(t *testing.T) {
@@ -1232,11 +1261,11 @@ func TestCreateSIPParticipantAffinity_NoConfig_WithCalls(t *testing.T) {
 
 	// Add 4 outbound calls
 	for i := 0; i < 4; i++ {
-		s.cli.activeCalls[LocalTag(fmt.Sprintf("out-%d", i))] = &outboundCall{}
+		s.cm().activeCalls[LocalTag(fmt.Sprintf("out-%d", i))] = &outboundCall{}
 	}
 	// Add 5 inbound calls
 	for i := 0; i < 5; i++ {
-		s.srv.byLocalTag[LocalTag(fmt.Sprintf("in-%d", i))] = &inboundCall{}
+		s.cm().byLocalTag[LocalTag(fmt.Sprintf("in-%d", i))] = &inboundCall{}
 	}
 
 	got := s.CreateSIPParticipantAffinity(context.Background(), nil)
@@ -1257,7 +1286,7 @@ func TestCreateSIPParticipantAffinity_WithMaxCalls_PartialLoad(t *testing.T) {
 
 	// Add 25 outbound calls before first measurement
 	for i := 0; i < 25; i++ {
-		s.cli.activeCalls[LocalTag(fmt.Sprintf("out-%d", i))] = &outboundCall{}
+		s.cm().activeCalls[LocalTag(fmt.Sprintf("out-%d", i))] = &outboundCall{}
 	}
 	got := s.CreateSIPParticipantAffinity(context.Background(), nil)
 	// 25 active, max 100 => 1 - 25/100 = 0.75
@@ -1265,7 +1294,7 @@ func TestCreateSIPParticipantAffinity_WithMaxCalls_PartialLoad(t *testing.T) {
 
 	// Add 25 more (50 total)
 	for i := 25; i < 50; i++ {
-		s.cli.activeCalls[LocalTag(fmt.Sprintf("out-%d", i))] = &outboundCall{}
+		s.cm().activeCalls[LocalTag(fmt.Sprintf("out-%d", i))] = &outboundCall{}
 	}
 	got = s.CreateSIPParticipantAffinity(context.Background(), nil)
 	// 50 active, max 100 => 1 - 50/100 = 0.5
@@ -1273,7 +1302,7 @@ func TestCreateSIPParticipantAffinity_WithMaxCalls_PartialLoad(t *testing.T) {
 
 	// Add 49 more (99 total, just under capacity)
 	for i := 50; i < 99; i++ {
-		s.cli.activeCalls[LocalTag(fmt.Sprintf("out-%d", i))] = &outboundCall{}
+		s.cm().activeCalls[LocalTag(fmt.Sprintf("out-%d", i))] = &outboundCall{}
 	}
 	got = s.CreateSIPParticipantAffinity(context.Background(), nil)
 	// 99 active, max 100 => 1 - 99/100 = 0.01
@@ -1284,7 +1313,7 @@ func TestCreateSIPParticipantAffinity_AtCapacity(t *testing.T) {
 	s := newServiceForAffinity(&config.Config{MaxActiveCalls: 10})
 
 	for i := 0; i < 10; i++ {
-		s.cli.activeCalls[LocalTag(fmt.Sprintf("out-%d", i))] = &outboundCall{}
+		s.cm().activeCalls[LocalTag(fmt.Sprintf("out-%d", i))] = &outboundCall{}
 	}
 
 	got := s.CreateSIPParticipantAffinity(context.Background(), nil)
@@ -1295,7 +1324,7 @@ func TestCreateSIPParticipantAffinity_OverCapacity(t *testing.T) {
 	s := newServiceForAffinity(&config.Config{MaxActiveCalls: 10})
 
 	for i := 0; i < 15; i++ {
-		s.cli.activeCalls[LocalTag(fmt.Sprintf("out-%d", i))] = &outboundCall{}
+		s.cm().activeCalls[LocalTag(fmt.Sprintf("out-%d", i))] = &outboundCall{}
 	}
 
 	got := s.CreateSIPParticipantAffinity(context.Background(), nil)
@@ -1307,10 +1336,10 @@ func TestCreateSIPParticipantAffinity_MixedInboundOutbound(t *testing.T) {
 
 	// 6 outbound + 4 inbound = 10 total
 	for i := 0; i < 6; i++ {
-		s.cli.activeCalls[LocalTag(fmt.Sprintf("out-%d", i))] = &outboundCall{}
+		s.cm().activeCalls[LocalTag(fmt.Sprintf("out-%d", i))] = &outboundCall{}
 	}
 	for i := 0; i < 4; i++ {
-		s.srv.byLocalTag[LocalTag(fmt.Sprintf("in-%d", i))] = &inboundCall{}
+		s.cm().byLocalTag[LocalTag(fmt.Sprintf("in-%d", i))] = &inboundCall{}
 	}
 
 	got := s.CreateSIPParticipantAffinity(context.Background(), nil)
@@ -1367,7 +1396,7 @@ func TestCreateSIPParticipantAffinity_TrunkWhitelist_WithMaxCalls(t *testing.T) 
 
 	// Add 50 calls
 	for i := 0; i < 50; i++ {
-		s.cli.activeCalls[LocalTag(fmt.Sprintf("out-%d", i))] = &outboundCall{}
+		s.cm().activeCalls[LocalTag(fmt.Sprintf("out-%d", i))] = &outboundCall{}
 	}
 
 	// Whitelisted trunk: should get normal affinity
@@ -1393,9 +1422,9 @@ func TestTransferSIPParticipantOutcome(t *testing.T) {
 	// call already finished and reporting out.
 	newService := func(out transferOutcome) *Service {
 		s := newServiceForAffinity(&config.Config{})
-		s.log = logger.GetLogger()
-		s.pendingTransfers = make(map[LocalTag]*PendingTransfer)
-		s.srv.byLocalTag[LocalTag(callID)] = &inboundCall{}
+		s.cm().log = logger.GetLogger()
+		s.cm().pendingTransfers = make(map[LocalTag]*PendingTransfer)
+		s.cm().byLocalTag[LocalTag(callID)] = &inboundCall{}
 
 		pending := &PendingTransfer{
 			CallID:     callID,
@@ -1404,7 +1433,7 @@ func TestTransferSIPParticipantOutcome(t *testing.T) {
 		}
 		pending.Done <- out
 		pending.Outcome.Store(&out)
-		s.pendingTransfers[LocalTag(callID)] = pending
+		s.cm().pendingTransfers[LocalTag(callID)] = pending
 		return s
 	}
 
@@ -1581,12 +1610,16 @@ func TestValidateCallProvider(t *testing.T) {
 		{"no provider info", nil, "<sip:911@example.com>", ""},
 		{"external to emergency", external, "<sip:911@example.com>", ""},
 		{"internal to regular number", internal, "<sip:+14155559110@example.com>", ""},
+		{"internal to tel with pauses", internal, "tel:+18005551234,,123", ""},
 		{"internal to emergency sip", internal, "<sip:911@example.com>", psrpc.InvalidArgument},
 		{"internal to emergency tel", internal, "tel:911", psrpc.InvalidArgument},
+		{"internal to emergency tel with params", internal, "tel:911;phone-context=example.com", psrpc.InvalidArgument},
+		{"internal to emergency tel with headers", internal, "tel:911?x=y", psrpc.InvalidArgument},
+		{"internal to emergency bracketed tel with headers", internal, "<tel:911?x=y>", psrpc.InvalidArgument},
 		{"internal to emergency 112", internal, "<sip:112@example.com>", psrpc.InvalidArgument},
 		{"internal to emergency 999", internal, "<sip:999@example.com>", psrpc.InvalidArgument},
-		{"internal transfers disabled", internalNoTransfer, "<sip:+14155559110@example.com>", psrpc.Unimplemented},
-		{"internal transfers disabled to emergency", internalNoTransfer, "<sip:911@example.com>", psrpc.Unimplemented},
+		{"internal transfers disabled", internalNoTransfer, "<sip:+14155559110@example.com>", psrpc.PermissionDenied},
+		{"internal transfers disabled to emergency", internalNoTransfer, "<sip:911@example.com>", psrpc.PermissionDenied},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1594,8 +1627,8 @@ func TestValidateCallProvider(t *testing.T) {
 			if c.provider != nil {
 				state = NewCallState(nil, &livekit.SIPCallInfo{ProviderInfo: c.provider})
 			}
-			s := &Service{}
-			err := s.validateCallProvider(state, c.transferTo)
+			cm := &callManager{}
+			err := cm.validateCallProvider(state, c.transferTo)
 			if c.code == "" {
 				require.NoError(t, err)
 				return
@@ -1611,21 +1644,12 @@ func TestValidateCallProvider(t *testing.T) {
 // phone number fails before any REFER is sent, for inbound and outbound calls.
 func TestTransferToEmergencyNumber(t *testing.T) {
 	internal := &livekit.ProviderInfo{Type: livekit.ProviderType_PROVIDER_TYPE_INTERNAL}
-	newService := func() *Service {
-		s := newServiceForAffinity(&config.Config{})
-		s.log = logger.GetLogger()
-		s.pendingTransfers = make(map[LocalTag]*PendingTransfer)
-		s.srv.byLocalTag["inbound"] = &inboundCall{
-			state: NewCallState(nil, &livekit.SIPCallInfo{ProviderInfo: internal, CallDirection: livekit.SIPCallDirection_SCD_INBOUND}),
-		}
-		s.cli.activeCalls["outbound"] = &outboundCall{
-			state: NewCallState(nil, &livekit.SIPCallInfo{ProviderInfo: internal, CallDirection: livekit.SIPCallDirection_SCD_OUTBOUND}),
-		}
-		return s
-	}
 	for _, callID := range []string{"inbound", "outbound"} {
 		t.Run(callID, func(t *testing.T) {
-			s := newService()
+			s := newTransferRefusalService(t, internal)
+			dir := map[string]string{"inbound": "in", "outbound": "out"}[callID]
+			totalBefore := gatherCounter(t, transfersTotalMetric, map[string]string{"dir": dir})
+			failedBefore := gatherCounter(t, transfersFailedMetric, map[string]string{"dir": dir, "reason": "invalid_argument"})
 			resp, err := s.TransferSIPParticipant(t.Context(), &rpc.InternalTransferSIPParticipantRequest{
 				SipCallId:  callID,
 				TransferTo: "<sip:911@carrier.example.com>",
@@ -1635,7 +1659,82 @@ func TestTransferToEmergencyNumber(t *testing.T) {
 			code, _ := psrpc.GetErrorCode(err)
 			require.Equal(t, psrpc.InvalidArgument, code)
 			require.NotNil(t, livekit.SIPTransferErrorFrom(err))
-			require.Empty(t, s.pendingTransfers)
+			require.Empty(t, s.cm().pendingTransfers)
+			require.Equal(t, totalBefore+1, gatherCounter(t, transfersTotalMetric, map[string]string{"dir": dir}))
+			require.Equal(t, failedBefore+1, gatherCounter(t, transfersFailedMetric, map[string]string{"dir": dir, "reason": "invalid_argument"}))
 		})
 	}
+}
+
+const (
+	transfersTotalMetric  = "livekit_sip_transfers_total"
+	transfersFailedMetric = "livekit_sip_transfers_failed_total"
+)
+
+// newTransferRefusalService returns a Service holding one inbound and one
+// outbound call on the given provider, with a started monitor.
+func newTransferRefusalService(t *testing.T, provider *livekit.ProviderInfo) *Service {
+	t.Helper()
+	mon, err := stats.NewMonitor(&config.Config{})
+	require.NoError(t, err)
+	require.NoError(t, mon.Start(&config.Config{}))
+	t.Cleanup(mon.Stop)
+
+	s := newServiceForAffinity(&config.Config{})
+	s.cm().log = logger.GetLogger()
+	s.cm().mon = mon
+	s.cm().pendingTransfers = make(map[LocalTag]*PendingTransfer)
+	s.cm().byLocalTag["inbound"] = &inboundCall{
+		state: NewCallState(nil, &livekit.SIPCallInfo{ProviderInfo: provider, CallDirection: livekit.SIPCallDirection_SCD_INBOUND}),
+	}
+	s.cm().activeCalls["outbound"] = &outboundCall{
+		state: NewCallState(nil, &livekit.SIPCallInfo{ProviderInfo: provider, CallDirection: livekit.SIPCallDirection_SCD_OUTBOUND}),
+	}
+	return s
+}
+
+func TestCallForwardingInfo(t *testing.T) {
+	invite := sip.NewRequest(sip.INVITE, sip.Uri{User: "+15550001111", Host: "example.com"})
+	invite.AppendHeader(sip.NewHeader("X-Twilio-CallToken", "token"))
+	invite.AppendHeader(sip.NewHeader("X-Other", "ignored"))
+
+	s := newServiceForAffinity(&config.Config{})
+	s.cm().byLocalTag["inbound"] = &inboundCall{
+		cc:        &sipInbound{id: "inbound", invite: invite},
+		projectID: "p_1",
+		call: &rpc.SIPCall{
+			From: &livekit.SIPUri{User: "+15550002222"},
+			To:   &livekit.SIPUri{User: "+15550001111"},
+		},
+	}
+	s.cm().activeCalls["outbound"] = &outboundCall{projectID: "p_1"}
+
+	t.Run("inbound", func(t *testing.T) {
+		info, err := s.GetSIPCallForwardingInfo("inbound", []string{"x-twilio-calltoken", "Identity"})
+		require.NoError(t, err)
+		require.Equal(t, &CallForwardingInfo{
+			SIPCallID: "inbound",
+			ProjectID: "p_1",
+			Direction: livekit.SIPCallDirection_SCD_INBOUND,
+			From:      "+15550002222",
+			To:        "+15550001111",
+			Headers:   map[string]string{"x-twilio-calltoken": "token"},
+		}, info)
+	})
+
+	t.Run("outbound", func(t *testing.T) {
+		info, err := s.GetSIPCallForwardingInfo("outbound", []string{"Identity"})
+		require.NoError(t, err)
+		require.Equal(t, &CallForwardingInfo{
+			SIPCallID: "outbound",
+			ProjectID: "p_1",
+			Direction: livekit.SIPCallDirection_SCD_OUTBOUND,
+		}, info)
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		_, err := s.GetSIPCallForwardingInfo("missing", nil)
+		code, _ := psrpc.GetErrorCode(err)
+		require.Equal(t, psrpc.NotFound, code)
+	})
 }

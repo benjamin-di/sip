@@ -26,6 +26,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 
@@ -369,27 +371,7 @@ func (r *testRoom) Participant() ParticipantInfo {
 func (r *testRoom) NewParticipantTrack(sampleRate int) (msdk.WriteCloser[msdk.PCM16Sample], error) {
 	// For testing, we need to mock NewParticipantTrack since it requires a real LocalParticipant
 	// which we don't have in our mock lksdk.Room. Return a no-op writer.
-	return &noOpWriter{}, nil
-}
-
-// noOpWriter is a no-op implementation of msdk.WriteCloser for testing
-type noOpWriter struct{}
-
-func (w *noOpWriter) String() string {
-	return "noOpWriter"
-}
-
-func (w *noOpWriter) SampleRate() int {
-	return RoomSampleRate
-}
-
-func (w *noOpWriter) WriteSample(samples msdk.PCM16Sample) error {
-	// No-op for testing
-	return nil
-}
-
-func (w *noOpWriter) Close() error {
-	return nil
+	return msdk.NewFuncWriteCloser(RoomSampleRate, func(msdk.PCM16Sample) error { return nil }), nil
 }
 
 func (r *testRoom) NewTrack() *mixer.Input {
@@ -504,6 +486,30 @@ type resolveCall struct {
 	sipScheme string
 }
 
+func newTestSIPClient(log logger.Logger, resolveFn func(network, host string, port int, sipScheme string) (netip.AddrPort, error)) *testSIPClient {
+	return &testSIPClient{
+		log:                    log,
+		resolveFn:              resolveFn,
+		requestByCallID:        make(map[string][]*sipRequest),
+		requestBySipCallID:     make(map[string][]*sipRequest),
+		transactionByCallID:    make(map[string][]*transactionRequest),
+		transactionBySipCallID: make(map[string][]*transactionRequest),
+		wakeup:                 make(chan struct{}),
+	}
+}
+
+// requestMethods returns the methods of the requests written for sipCallID, in
+// order, without consuming them.
+func (w *testSIPClient) requestMethods(sipCallID string) []sip.RequestMethod {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var m []sip.RequestMethod
+	for _, r := range w.requestBySipCallID[sipCallID] {
+		m = append(m, r.req.Method)
+	}
+	return m
+}
+
 func (w *testSIPClient) ResolveAddrPreferSRV(ctx context.Context, network, host string, port int, sipScheme string) (netip.AddrPort, error) {
 	w.mu.Lock()
 	w.resolveCalls = append(w.resolveCalls, resolveCall{network, host, port, sipScheme})
@@ -566,6 +572,9 @@ func (w *testSIPClient) FillRequestBlanks(req *sip.Request) {
 func (w *testSIPClient) deliverTx(txReq *transactionRequest) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.wakeup == nil {
+		return // client closed; drop requests from goroutines that outlive the test
+	}
 	ch := w.wakeup
 	w.wakeup = make(chan struct{})
 	defer close(ch)
@@ -585,6 +594,9 @@ func (w *testSIPClient) deliverTx(txReq *transactionRequest) {
 func (w *testSIPClient) deliverReq(req *sipRequest) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.wakeup == nil {
+		return // client closed; drop requests from goroutines that outlive the test
+	}
 	ch := w.wakeup
 	w.wakeup = make(chan struct{})
 	defer close(ch)
@@ -892,6 +904,7 @@ type testSIPHarness struct {
 	log           logger.Logger
 	Client        *Client
 	Server        *Server
+	manager       *callManager
 	client        *testSIPClient
 	clientCreated atomic.Bool
 }
@@ -919,7 +932,7 @@ func (h *testSIPHarness) WaitRequest(tb testing.TB, timeout time.Duration, callI
 }
 
 // Handle delivers req to the package as sipgo would: INVITE/ACK/BYE/NOTIFY/OPTIONS
-// hit Server handlers, anything else falls through to Client.OnRequest then OnNoRoute.
+// hit the CallManager handlers, anything else goes to HandleNoRoute.
 // Dispatch runs in a goroutine because inbound Accept blocks until ACK.
 func (h *testSIPHarness) Handle(req *sip.Request) *testSIPServerTransaction {
 	if req.Source() == "" {
@@ -945,20 +958,17 @@ func (h *testSIPHarness) dispatch(req *sip.Request, tx sip.ServerTransaction) {
 	log := slog.New(logger.ToSlogHandler(h.log))
 	switch req.Method {
 	case sip.INVITE:
-		h.Server.onInvite(log, req, tx)
+		h.manager.HandleInvite(log, req, tx)
 	case sip.ACK:
-		h.Server.onAck(log, req, tx)
+		h.manager.HandleAck(log, req, tx)
 	case sip.BYE:
-		h.Server.onBye(log, req, tx)
+		h.manager.HandleBye(log, req, tx)
 	case sip.NOTIFY:
-		h.Server.onNotify(log, req, tx)
+		h.manager.HandleNotify(log, req, tx)
 	case sip.OPTIONS:
-		h.Server.onOptions(log, req, tx)
+		h.manager.HandleOptions(log, req, tx)
 	default:
-		if h.Client != nil && h.Client.OnRequest(req, tx) {
-			return
-		}
-		h.Server.OnNoRoute(log, req, tx)
+		h.manager.HandleNoRoute(log, req, tx)
 	}
 }
 
@@ -1046,20 +1056,11 @@ func NewTestSIP(t testing.TB, cfg TestSIPConfig) *testSIPHarness {
 	}
 
 	h := &testSIPHarness{
-		log: log,
-		client: &testSIPClient{
-			log:                    log,
-			requestByCallID:        make(map[string][]*sipRequest),
-			requestBySipCallID:     make(map[string][]*sipRequest),
-			transactionByCallID:    make(map[string][]*transactionRequest),
-			transactionBySipCallID: make(map[string][]*transactionRequest),
-			wakeup:                 make(chan struct{}),
-			resolveFn:              cfg.ResolveAddr,
-		},
+		log:    log,
+		client: newTestSIPClient(log, cfg.ResolveAddr),
 	}
 
-	client := NewClient(cfg.Region, cfg.Config, log, cfg.Monitor, cfg.GetIOClient, WithGetSipClient(h.newClient), WithGetRoomClient(cfg.GetRoom))
-	client.SetHandler(cfg.Handler)
+	client := NewClient(cfg.Config, log, WithGetSipClient(h.newClient))
 
 	// Set up service config with minimal values
 	localIP, err := config.GetLocalIP()
@@ -1080,14 +1081,16 @@ func NewTestSIP(t testing.TB, cfg TestSIPConfig) *testSIPHarness {
 		client.Stop()
 	})
 
-	srv := NewServer(cfg.Region, cfg.Config, log, cfg.Monitor, cfg.GetIOClient, WithGetRoomServer(cfg.GetRoom), WithClient(client))
-	srv.SetHandler(cfg.Handler)
+	srv := NewServer(cfg.Config, log)
 	srv.sconf = sconf
-	srv.sipUnhandled = client.OnRequest
+	manager := newCallManager(srv, client, cfg.Region, cfg.Config, sconf, log, cfg.Monitor, newTestNonces(t), cfg.GetIOClient, WithGetRoom(cfg.GetRoom))
+	manager.SetHandler(cfg.Handler)
 	t.Cleanup(srv.Stop)
+	t.Cleanup(manager.Stop)
 
 	h.Client = client
 	h.Server = srv
+	h.manager = manager
 	return h
 }
 
@@ -1166,4 +1169,60 @@ func (t *failingRetransmitTx) Respond(res *sip.Response) error {
 		return t.ServerTransaction.Respond(res)
 	}
 	return errors.New("write udp: connection refused")
+}
+
+// Test util for incrementing prometheus counter metrics.
+func gatherCounter(t testing.TB, name string, labels map[string]string) float64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	var total float64
+	for _, f := range families {
+		// Matching metric
+		if f.GetName() != name {
+			continue
+		}
+	metrics:
+		for _, m := range f.GetMetric() {
+			got := make(map[string]string, len(m.GetLabel()))
+			for _, l := range m.GetLabel() {
+				got[l.GetName()] = l.GetValue()
+			}
+			// Matching labels
+			for k, v := range labels {
+				if got[k] != v {
+					continue metrics
+				}
+			}
+			total += m.GetCounter().GetValue()
+		}
+	}
+	return total
+}
+
+// gatherHistogramCount sums the sample counts of the histogram series that match labels.
+func gatherHistogramCount(t testing.TB, name string, labels map[string]string) uint64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	var total uint64
+	for _, f := range families {
+		if f.GetName() != name {
+			continue
+		}
+	metrics:
+		for _, m := range f.GetMetric() {
+			got := make(map[string]string, len(m.GetLabel()))
+			for _, l := range m.GetLabel() {
+				got[l.GetName()] = l.GetValue()
+			}
+			for k, v := range labels {
+				if got[k] != v {
+					continue metrics
+				}
+			}
+			total += m.GetHistogram().GetSampleCount()
+		}
+	}
+	return total
 }
