@@ -62,6 +62,7 @@ prometheus_port: port used to collect prometheus metrics. Used for autoscaling
 log_level: debug, info, warn, or error (default info)
 sip_port: port to listen and send SIP traffic (default 5060)
 rtp_port: port to listen and send RTP traffic (default 10000-20000)
+mixer_input_buffer_frames: decoded room audio buffer, in 20 ms frames (0 uses upstream default 5, maximum 50)
 psrpc: # optional gzip compression of psrpc bus payloads, see the compatibility note below
   compression:
     quality: gzip level 1-9. 0, the default, disables compression
@@ -70,6 +71,12 @@ psrpc: # optional gzip compression of psrpc bus payloads, see the compatibility 
 ```
 
 The config file can be added to a mounted volume with its location passed in the SIP_CONFIG_FILE env var, or its body can be passed in the SIP_CONFIG_BODY env var.
+
+`mixer_input_buffer_frames` exposes the upstream Media SDK mixer option for bursty
+WebRTC delivery. For example, 15 frames allows a 300 ms buffer instead of the
+100 ms default, with a higher initial playout delay. This is a bounded workaround
+for mixer starvation; it does not fix carrier codec artifacts or qualify a route.
+Use the call's mixer restart/drop statistics and receiver audio to evaluate it.
 
 > **Compatibility note on `psrpc.compression`**
 >
