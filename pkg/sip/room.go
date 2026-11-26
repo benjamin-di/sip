@@ -279,6 +279,7 @@ type RoomConfig struct {
 	RoomConfig       *livekit.RoomConfiguration
 	JitterBuf        bool
 	LogSignalChanges bool
+	PreferredRegion  *livekit.RegionInfo
 }
 
 func NewRoom(log logger.Logger, st *RoomStats, options ...mixer.MixerOptions) *Room {
@@ -438,6 +439,7 @@ func (r *Room) Connect(ctx context.Context, conf *config.Config, rconf RoomConfi
 	err := room.JoinWithContextAndToken(ctx, rconf.WsUrl, rconf.Token,
 		lksdk.WithAutoSubscribe(false),
 		lksdk.WithExtraAttributes(partConf.Attributes),
+		lksdk.WithPreferredRegion(rconf.PreferredRegion),
 	)
 	if err != nil {
 		return err
